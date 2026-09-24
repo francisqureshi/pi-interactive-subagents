@@ -987,24 +987,24 @@ describe("subagent discovery", () => {
     );
   });
 
-  it("bundled scout/worker/reviewer agents resolve as non-interactive; planner resolves as interactive", () => {
-    for (const name of ["scout", "worker", "reviewer"]) {
+  it("bundles only scout and worker while respecting global overrides", async () => {
+    await withIsolatedAgentEnv(async () => {
+      const bundled = testApi.discoverAgentDefinitions()
+        .filter((agent: { source: string }) => agent.source === "package")
+        .map((agent: { name: string }) => agent.name)
+        .sort();
+      assert.deepEqual(bundled, ["scout", "worker"]);
+    });
+
+    for (const name of ["scout", "worker"]) {
       const defs = testApi.loadAgentDefaults(name);
-      assert.ok(defs, `expected bundled agent ${name} to be discoverable`);
+      assert.ok(defs, `expected ${name} to be discoverable`);
       assert.equal(
         testApi.resolveEffectiveInteractive({ name, task: "" }, defs),
         false,
         `${name} should resolve as non-interactive (autonomous)`,
       );
     }
-
-    const planner = testApi.loadAgentDefaults("planner");
-    assert.ok(planner, "expected bundled planner to be discoverable");
-    assert.equal(
-      testApi.resolveEffectiveInteractive({ name: "planner", task: "" }, planner),
-      true,
-      "planner should resolve as interactive (no auto-exit)",
-    );
   });
 
   it("ignores invalid session-mode values", async () => {
@@ -1343,6 +1343,12 @@ describe("cmux.ts interpretExitSidecar", () => {
   });
 });
 describe("commands", () => {
+  it("does not register the removed planner workflow", () => {
+    const { api, registeredCommands } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    assert.ok(!registeredCommands.some((command) => command.name === "plan"));
+  });
+
   it("/iterate always emits a full-context fork tool call", () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
 
