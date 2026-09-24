@@ -1524,6 +1524,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               type: "text",
               text:
                 `Sub-agent "${params.name}" launched and is now running in the background. ` +
+                (getMuxBackend() === "zmx"
+                  ? `To inspect it from another terminal: zmx attach ${running.surface}. `
+                  : "") +
                 `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
                 `The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
                 `Until then, move on to other work or tell the user you're waiting.`,
@@ -1536,6 +1539,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             agent: params.agent,
             sessionFile: running.sessionFile,
             launchScriptFile: running.launchScriptFile,
+            surface: running.surface,
             status: "started",
           },
         };
@@ -1585,7 +1589,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             theme.fg("accent", "▸") +
               " " +
               theme.fg("toolTitle", theme.bold(name)) +
-              theme.fg("dim", " — started"),
+              theme.fg("dim", getMuxBackend() === "zmx" && details.surface
+                ? ` — zmx attach ${details.surface}`
+                : " — started"),
             0,
             0,
           );
@@ -1760,7 +1766,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             theme.fg("accent", "▸") +
               " " +
               theme.fg("toolTitle", theme.bold(name)) +
-              theme.fg("dim", " — resumed"),
+              theme.fg("dim", getMuxBackend() === "zmx" && details.surface
+                ? ` — zmx attach ${details.surface}`
+                : " — resumed"),
             0,
             0,
           );
@@ -1951,17 +1959,40 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           });
 
         return {
-          content: [{ type: "text", text: `Session "${name}" resumed.` }],
+          content: [{
+            type: "text",
+            text: `Session "${name}" resumed.` +
+              (getMuxBackend() === "zmx" ? ` To inspect it: zmx attach ${surface}.` : ""),
+          }],
           details: {
             id,
             name,
             sessionPath: params.sessionPath,
             launchScriptFile,
+            surface,
             status: "started",
           },
         };
       },
     });
+
+  // Show attachable sessions without switching the parent Pi's terminal away.
+  pi.registerCommand("subagent-sessions", {
+    description: "List running subagents and their zmx attach commands",
+    handler: async (_args, ctx) => {
+      const runs = [...runningSubagents.values()];
+      if (runs.length === 0) {
+        ctx.ui.notify("No running subagents.", "info");
+        return;
+      }
+      const lines = runs.map((run) =>
+        getMuxBackend() === "zmx"
+          ? `${run.name}: zmx attach ${run.surface}`
+          : `${run.name}: ${run.surface}`,
+      );
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+  });
 
   // /iterate command — fork the session into a subagent
   pi.registerCommand("iterate", {

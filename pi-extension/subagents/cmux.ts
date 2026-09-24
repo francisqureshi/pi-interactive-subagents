@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
-export type MuxBackend = "cmux" | "tmux" | "zellij" | "wezterm";
+export type MuxBackend = "cmux" | "tmux" | "zellij" | "wezterm" | "zmx";
 
 const commandAvailability = new Map<string, boolean>();
 
@@ -43,7 +43,9 @@ function hasCommand(command: string): boolean {
 
 function muxPreference(): MuxBackend | null {
   const pref = (process.env.PI_SUBAGENT_MUX ?? "").trim().toLowerCase();
-  if (pref === "cmux" || pref === "tmux" || pref === "zellij" || pref === "wezterm") return pref;
+  if (pref === "cmux" || pref === "tmux" || pref === "zellij" || pref === "wezterm" || pref === "zmx") {
+    return pref;
+  }
   return null;
 }
 
@@ -61,6 +63,14 @@ function isZellijRuntimeAvailable(): boolean {
 
 function isWezTermRuntimeAvailable(): boolean {
   return !!process.env.WEZTERM_UNIX_SOCKET && hasCommand("wezterm");
+}
+
+function isZmxRuntimeAvailable(): boolean {
+  return hasCommand("zmx") && !!(process.env.ZMX_SESSION || process.env.TERM?.includes("ghostty"));
+}
+
+export function isZmxAvailable(): boolean {
+  return isZmxRuntimeAvailable();
 }
 
 export function isCmuxAvailable(): boolean {
@@ -85,11 +95,14 @@ export function getMuxBackend(): MuxBackend | null {
   if (pref === "tmux") return isTmuxRuntimeAvailable() ? "tmux" : null;
   if (pref === "zellij") return isZellijRuntimeAvailable() ? "zellij" : null;
   if (pref === "wezterm") return isWezTermRuntimeAvailable() ? "wezterm" : null;
+  // An explicit override also supports headless/remote shells outside Ghostty.
+  if (pref === "zmx") return hasCommand("zmx") ? "zmx" : null;
 
   if (isCmuxRuntimeAvailable()) return "cmux";
   if (isTmuxRuntimeAvailable()) return "tmux";
   if (isZellijRuntimeAvailable()) return "zellij";
   if (isWezTermRuntimeAvailable()) return "wezterm";
+  if (isZmxRuntimeAvailable()) return "zmx";
   return null;
 }
 
@@ -111,7 +124,10 @@ export function muxSetupHint(): string {
   if (pref === "wezterm") {
     return "Start pi inside WezTerm.";
   }
-  return "Start pi inside cmux (`cmux pi`), tmux (`tmux new -A -s pi 'pi'`), zellij (`zellij --session pi`, then run `pi`), or WezTerm.";
+  if (pref === "zmx") {
+    return "Install zmx and start pi in Ghostty (optionally inside `zmx attach pi`).";
+  }
+  return "Start pi inside cmux, tmux, zellij, WezTerm, or Ghostty with zmx installed (or set PI_SUBAGENT_MUX=zmx).";
 }
 
 function requireMuxBackend(): MuxBackend {
@@ -140,6 +156,24 @@ export function exitStatusVar(): string {
 
 export function shellEscape(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+// zmx provides persistent PTYs, not windows/panes. Each surface is an independent
+// session that can be inspected with `zmx attach <surface>` from another terminal.
+function zmxEnv(): NodeJS.ProcessEnv {
+  // Keep surface IDs usable from any shell, even when the parent uses a prefix.
+  return { ...process.env, ZMX_SESSION_PREFIX: "" };
+}
+
+function createZmxSurface(): string {
+  const surface =
+    `pi-subagent-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  // `run` with no command creates a session but exits 1 on zmx 0.4.x.
+  // A no-op command both creates the session and returns success.
+  // Ignore stdio: the background zmx daemon inherits open output pipes, so
+  // execFileSync with captured stdout would wait indefinitely for EOF.
+  execFileSync("zmx", ["run", surface, "/bin/true"], { stdio: "ignore", env: zmxEnv() });
+  return surface;
 }
 
 function tailLines(text: string, lines: number): string {
@@ -776,6 +810,8 @@ export function createSurface(name: string): string {
     return createZellijSurface(name);
   }
 
+  if (backend === "zmx") return createZmxSurface();
+
   // On tmux, target the parent pi's pane so splits follow the agent, not the user's focus.
   // See https://github.com/HazAT/pi-interactive-subagents/issues/12
   const fromSurface = backend === "tmux" ? process.env.TMUX_PANE : undefined;
@@ -822,6 +858,9 @@ export function createSurfaceSplit(
   if (backend === "cmux") {
     return createCmuxSplitSurface(name, direction, fromSurface).surface;
   }
+
+  // zmx has no split concept; return a separately attachable session.
+  if (backend === "zmx") return createZmxSurface();
 
   if (backend === "tmux") {
     const args = ["split-window", "-d"];
@@ -932,6 +971,8 @@ export function renameCurrentTab(title: string): void {
     return;
   }
 
+  if (backend === "zmx") return; // No tab or workspace title API.
+
   if (backend === "wezterm") {
     const paneId = process.env.WEZTERM_PANE;
     const args = ["cli", "set-tab-title"];
@@ -983,6 +1024,8 @@ export function renameWorkspace(title: string): void {
     return;
   }
 
+  if (backend === "zmx") return;
+
   if (backend === "wezterm") {
     const paneId = process.env.WEZTERM_PANE;
     const args = ["cli", "set-window-title"];
@@ -1010,6 +1053,17 @@ export function renameWorkspace(title: string): void {
  */
 export function sendCommand(surface: string, command: string): void {
   const backend = requireMuxBackend();
+
+  if (backend === "zmx") {
+    // `run` quotes argv and submits a command to the session's shell, without
+    // attaching (important when the caller is already inside a zmx session).
+    // A separate bash handles compound commands and arbitrary shell quoting.
+    execFileSync("zmx", ["run", surface, "bash", "-lc", command], {
+      stdio: "ignore",
+      env: zmxEnv(),
+    });
+    return;
+  }
 
   if (backend === "cmux") {
     execSync(`cmux send --surface ${shellEscape(surface)} ${shellEscape(command + "\n")}`, {
@@ -1042,6 +1096,20 @@ export function sendCommand(surface: string, command: string): void {
  */
 export function sendEscape(surface: string): void {
   const backend = requireMuxBackend();
+
+  if (backend === "zmx") {
+    // Raw PTY input is available in newer zmx releases. Older releases only
+    // support `run`, which would queue a shell command instead of interrupting Pi.
+    const help = execFileSync("zmx", ["help"], { encoding: "utf8" });
+    if (!/^\s*\[s\]end\s/m.test(help)) {
+      throw new Error(
+        "subagent_interrupt requires zmx with the `send` command (upgrade zmx); " +
+        "do not use `zmx run` to interrupt Pi.",
+      );
+    }
+    execFileSync("zmx", ["send", surface, "\u001b"], { encoding: "utf8", env: zmxEnv() });
+    return;
+  }
 
   if (backend === "cmux") {
     execFileSync("cmux", ["send", "--surface", surface, "\u001b"], { encoding: "utf8" });
@@ -1107,6 +1175,13 @@ export function sendLongCommand(
 export function readScreen(surface: string, lines = 50): string {
   const backend = requireMuxBackend();
 
+  if (backend === "zmx") {
+    const raw = execFileSync("zmx", ["history", surface], {
+      encoding: "utf8", env: zmxEnv(), maxBuffer: 10 * 1024 * 1024,
+    });
+    return tailLines(raw, lines);
+  }
+
   if (backend === "cmux") {
     return execSync(`cmux read-screen --surface ${shellEscape(surface)} --lines ${lines}`, {
       encoding: "utf8",
@@ -1150,6 +1225,13 @@ export function readScreen(surface: string, lines = 50): string {
 export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
   const backend = requireMuxBackend();
 
+  if (backend === "zmx") {
+    const { stdout } = await execFileAsync("zmx", ["history", surface], {
+      encoding: "utf8", env: zmxEnv(), maxBuffer: 10 * 1024 * 1024,
+    });
+    return tailLines(stdout, lines);
+  }
+
   if (backend === "cmux") {
     const { stdout } = await execFileAsync(
       "cmux",
@@ -1192,6 +1274,11 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
  */
 export function closeSurface(surface: string): void {
   const backend = requireMuxBackend();
+
+  if (backend === "zmx") {
+    execFileSync("zmx", ["kill", surface], { encoding: "utf8", env: zmxEnv() });
+    return;
+  }
 
   if (backend === "cmux") {
     execSync(`cmux close-surface --surface ${shellEscape(surface)}`, {

@@ -26,7 +26,7 @@ subagent({ name: "Scout: DB", agent: "scout", task: "Map database schema" });
 ## Install
 
 ```bash
-pi install git:github.com/HazAT/pi-interactive-subagents
+pi install git:github.com/francisqureshi/pi-interactive-subagents
 ```
 
 Supported multiplexers:
@@ -35,6 +35,7 @@ Supported multiplexers:
 - [tmux](https://github.com/tmux/tmux)
 - [zellij](https://zellij.dev)
 - [WezTerm](https://wezfurlong.org/wezterm/) (terminal emulator with built-in multiplexing)
+- [zmx](https://github.com/neurosnap/zmx) (detached, attachable sessions; works with Ghostty without tmux)
 
 Start pi inside one of them:
 
@@ -46,9 +47,10 @@ tmux new -A -s pi 'pi'
 zellij --session pi   # then run: pi
 # or
 # just run pi inside WezTerm — no wrapper needed
+# or run pi inside Ghostty with zmx installed; `zmx attach pi` for a persistent main session
 ```
 
-Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij|wezterm` to force a specific backend.
+Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij|wezterm|zmx` to force a specific backend.
 
 If your shell startup is slow and subagent commands sometimes get dropped before the prompt is ready, set `PI_SUBAGENT_SHELL_READY_DELAY_MS` to a higher value (defaults to `500`):
 
@@ -56,17 +58,25 @@ If your shell startup is slow and subagent commands sometimes get dropped before
 export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500
 ```
 
-Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch commands target child surfaces by explicit ID, so focus and command delivery are independent. Note: the `interactive` option controls parent status notifications, not terminal focus.
+Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch commands target child surfaces by explicit ID, so focus and command delivery are independent. With zmx there are **no panes**: each subagent starts in a detached named session, so Ghostty keeps focus. Note: the `interactive` option controls parent status notifications, not terminal focus.
+
+### Detached zmx sessions in Ghostty
+
+Install `zmx`, then start Pi in Ghostty (`zmx attach pi` is optional, but keeps the parent session alive). Ghostty has no portable CLI for opening a split, so this backend starts agents **headlessly** with `zmx run` instead of keyboard automation or tmux. It is auto-detected when `TERM` contains `ghostty` or Pi is inside a zmx session; otherwise set `PI_SUBAGENT_MUX=zmx` explicitly. Set it explicitly if another installed multiplexer would otherwise take priority.
+
+Each run gets a unique `pi-subagent-…` session. Use `/subagent-sessions` in the parent Pi to see live names, then `zmx attach pi-subagent-…` from a shell in a second Ghostty tab/window to interact with one. `zmx list --short` also shows the names. If you set `ZMX_SESSION_PREFIX` in your shell, unset it when attaching (`env -u ZMX_SESSION_PREFIX zmx attach <name>`); this extension deliberately creates unprefixed session names. **Do not launch `zmx attach` as a subprocess from inside the parent zmx session**: nested attach switches that terminal away from the parent; use another terminal or intentionally switch at a shell prompt. Finishing an agent closes its zmx session, as other backends close its pane. The Pi session file remains available for resume.
+
+`subagent_interrupt` requires a recent zmx with `zmx send` (raw PTY input); older versions such as 0.4.1 can spawn/watch/attach agents but cannot deliver Escape, and return an explicit upgrade error. Nothing in this backend launches or depends on Ghostty itself, so it also works over SSH or in a headless shell.
 
 ## What's Included
 
 ### Extensions
 
-**Subagents** — 4 main-session tools + 3 commands, plus 1 subagent-only tool:
+**Subagents** — 4 main-session tools + 4 commands, plus 1 subagent-only tool:
 
 | Tool                 | Description                                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------- |
-| `subagent`           | Spawn a sub-agent in a dedicated multiplexer pane (async — returns immediately)             |
+| `subagent`           | Spawn a sub-agent in a mux pane or detached zmx session (async — returns immediately)       |
 | `subagent_interrupt` | Interrupt a running Pi-backed subagent's current turn                                       |
 | `subagents_list`     | List available agent definitions                                                            |
 | `subagent_resume`    | Resume a previous sub-agent session (async)                                                 |
@@ -76,6 +86,7 @@ Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch 
 | `/plan`                    | Start a full planning workflow       |
 | `/iterate`                 | Fork into a subagent for quick fixes |
 | `/subagent <agent> <task>` | Spawn a named agent directly         |
+| `/subagent-sessions`       | List live zmx attach commands        |
 
 ### Bundled Agents
 
@@ -87,7 +98,7 @@ Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch 
 | **reviewer**      | Opus (medium thinking) | Reviews code for bugs, security issues, correctness                                      |
 | **visual-tester** | Sonnet                 | Visual QA via Chrome CDP — screenshots, responsive testing, interaction testing          |
 
-Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location.
+Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location. Existing `scout.md`, `worker.md`, and `researcher.md` in the global directory remain available even if another subagent extension is removed; their `name`, `model`, `tools`, `thinking`, and `auto-exit` fields are recognized here.
 
 ---
 
@@ -472,6 +483,7 @@ Every sub-agent session displays a compact tools widget showing available and de
   - [tmux](https://github.com/tmux/tmux)
   - [zellij](https://zellij.dev)
   - [WezTerm](https://wezfurlong.org/wezterm/)
+  - [zmx](https://github.com/neurosnap/zmx) (Ghostty or any terminal; no tmux)
 
 ```bash
 cmux pi
@@ -481,12 +493,13 @@ tmux new -A -s pi 'pi'
 zellij --session pi   # then run: pi
 # or
 # just run pi inside WezTerm
+# or run pi inside Ghostty with zmx installed
 ```
 
 Optional backend override:
 
 ```bash
-export PI_SUBAGENT_MUX=cmux   # or tmux, zellij, wezterm
+export PI_SUBAGENT_MUX=zmx    # or cmux, tmux, zellij, wezterm
 ```
 
 ---
