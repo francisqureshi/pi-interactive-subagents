@@ -4,8 +4,10 @@ import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { visibleWidth } from "@mariozechner/pi-tui";
+import { Key, visibleWidth } from "@mariozechner/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
+import subagentDoneExtension from "../pi-extension/subagents/subagent-done.ts";
+import { parseZmxVersion } from "../pi-extension/subagents/zmx-navigation.ts";
 
 import {
   getLeafId,
@@ -81,12 +83,14 @@ function withTempDir(run: (dir: string) => void) {
 function createMockExtensionApi() {
   const registeredTools: Array<any> = [];
   const registeredCommands: Array<any> = [];
+  const registeredShortcuts: Array<any> = [];
   const registeredMessageRenderers: Array<any> = [];
   const sentUserMessages: string[] = [];
   const sentMessages: Array<any> = [];
   return {
     registeredTools,
     registeredCommands,
+    registeredShortcuts,
     registeredMessageRenderers,
     sentUserMessages,
     sentMessages,
@@ -101,7 +105,9 @@ function createMockExtensionApi() {
       registerMessageRenderer(name: string, renderer: any) {
         registeredMessageRenderers.push({ name, renderer });
       },
-      registerShortcut() {},
+      registerShortcut(key: string, shortcut: any) {
+        registeredShortcuts.push({ key, ...shortcut });
+      },
       sendUserMessage(message: string) {
         sentUserMessages.push(message);
       },
@@ -1343,6 +1349,71 @@ describe("cmux.ts interpretExitSidecar", () => {
   });
 });
 describe("commands", () => {
+  it("recognizes ZMX versions that support nested switching", () => {
+    assert.deepEqual(parseZmxVersion("zmx\t0.4.1\n"), { major: 0, minor: 4 });
+    assert.deepEqual(parseZmxVersion("zmx\t0.8.1\n"), { major: 0, minor: 8 });
+    assert.equal(parseZmxVersion("invalid"), null);
+  });
+
+  it("registers a keyboard shortcut for the active-session selector", () => {
+    const { api, registeredShortcuts } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    assert.ok(registeredShortcuts.some((shortcut) => shortcut.key === Key.ctrlAlt("a")));
+  });
+
+  it("opens the active-session selector with a back-to-parent option", async () => {
+    const previousMux = process.env.PI_SUBAGENT_MUX;
+    const previousParent = process.env.PI_SUBAGENT_PARENT_ZMX_SESSION;
+    process.env.PI_SUBAGENT_MUX = "zmx";
+    process.env.PI_SUBAGENT_PARENT_ZMX_SESSION = "parent-session";
+    const running = (subagentsModule as any).__test__.runningSubagents as Map<string, any>;
+    running.set("test-navigation", { id: "test-navigation", name: "Scout", agent: "scout", surface: "pi-subagent-test-navigation" });
+    try {
+      const { api, registeredCommands } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const command = registeredCommands.find((entry) => entry.name === "subagent-sessions");
+      assert.ok(command);
+      let options: string[] = [];
+      await command.handler("", {
+        mode: "tui",
+        ui: {
+          select: async (_title: string, choices: string[]) => {
+            options = choices;
+            return undefined; // Escape cancels without switching
+          },
+          notify() {},
+        },
+      });
+      assert.match(options[0], /Back to parent \(parent-session\)/);
+      assert.match(options[1], /Scout.*pi-subagent-test-navigation/);
+    } finally {
+      running.delete("test-navigation");
+      restoreEnvVar("PI_SUBAGENT_MUX", previousMux);
+      restoreEnvVar("PI_SUBAGENT_PARENT_ZMX_SESSION", previousParent);
+    }
+  });
+
+  it("registers a child-only /subagent-back command", () => {
+    const previous = process.env.PI_SUBAGENT_PARENT_ZMX_SESSION;
+    process.env.PI_SUBAGENT_PARENT_ZMX_SESSION = "parent-session";
+    try {
+      const { api, registeredCommands } = createMockExtensionApi();
+      subagentDoneExtension(api);
+      assert.ok(registeredCommands.some((entry) => entry.name === "subagent-back"));
+    } finally {
+      restoreEnvVar("PI_SUBAGENT_PARENT_ZMX_SESSION", previous);
+    }
+  });
+
+  it("uses Left only for an empty focused editor with active session targets", () => {
+    const fn = (subagentsModule as any).__test__.shouldOpenSessionMenuOnLeft;
+    assert.equal(fn("\u001b[D", "", false, true), true);
+    assert.equal(fn("\u001b[D", "draft", false, true), false);
+    assert.equal(fn("\u001b[D", "", true, true), false);
+    assert.equal(fn("\u001b[D", "", false, false), false);
+    assert.equal(fn("\u001b[C", "", false, true), false);
+  });
+
   it("does not register the removed planner workflow", () => {
     const { api, registeredCommands } = createMockExtensionApi();
     (subagentsModule as any).default(api);

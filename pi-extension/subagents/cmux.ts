@@ -172,7 +172,7 @@ function createZmxSurface(): string {
   // A no-op command both creates the session and returns success.
   // Ignore stdio: the background zmx daemon inherits open output pipes, so
   // execFileSync with captured stdout would wait indefinitely for EOF.
-  execFileSync("zmx", ["run", surface, "/bin/true"], { stdio: "ignore", env: zmxEnv() });
+  execFileSync("zmx", ["run", surface, "true"], { stdio: "ignore", env: zmxEnv() });
   return surface;
 }
 
@@ -1055,13 +1055,20 @@ export function sendCommand(surface: string, command: string): void {
   const backend = requireMuxBackend();
 
   if (backend === "zmx") {
-    // `run` quotes argv and submits a command to the session's shell, without
-    // attaching (important when the caller is already inside a zmx session).
-    // A separate bash handles compound commands and arbitrary shell quoting.
-    execFileSync("zmx", ["run", surface, "bash", "-lc", command], {
-      stdio: "ignore",
-      env: zmxEnv(),
-    });
+    // New zmx `run` waits for the command to finish and redirects stdin from
+    // /dev/null, so it cannot launch an interactive Pi. `send` writes directly
+    // to the session PTY without attaching or waiting for the child to exit.
+    const help = execFileSync("zmx", ["help"], { encoding: "utf8" });
+    if (/^\s*\[s\]end\s/m.test(help)) {
+      execFileSync("zmx", ["send", surface, command + "\r"], {
+        stdio: "ignore", env: zmxEnv(),
+      });
+    } else {
+      // zmx 0.4.x has only `run`, which submits a command without waiting.
+      execFileSync("zmx", ["run", surface, "bash", "-lc", command], {
+        stdio: "ignore", env: zmxEnv(),
+      });
+    }
     return;
   }
 

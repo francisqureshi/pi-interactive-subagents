@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { keyHint } from "@mariozechner/pi-coding-agent";
+import { CustomEditor, keyHint } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
-import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Box, Key, Text, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -14,6 +14,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { homedir } from "node:os";
+import { currentZmxSession, parentZmxSession, switchZmxSession } from "./zmx-navigation.ts";
 import {
   isMuxAvailable,
   muxSetupHint,
@@ -597,7 +598,9 @@ function borderBottom(width: number): string {
 function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): string[] {
   const count = agents.length;
   const title = "Subagents";
-  const info = `${count} running`;
+  const info = getMuxBackend() === "zmx"
+    ? `${count} running · ←/Ctrl+Alt+A`
+    : `${count} running`;
 
   const lines: string[] = [borderTop(title, info, width)];
 
@@ -617,6 +620,31 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
 
   lines.push(borderBottom(width));
   return lines;
+}
+
+function shouldOpenSessionMenuOnLeft(
+  data: string,
+  editorText: string,
+  autocompleteOpen: boolean,
+  hasTargets: boolean,
+): boolean {
+  return matchesKey(data, Key.left) && editorText.length === 0 && !autocompleteOpen && hasTargets;
+}
+
+/** Receives keys only when the main editor is focused, never in question dialogs. */
+class SubagentNavigationEditor extends CustomEditor {
+  onOpenSessionMenu?: () => void;
+  hasSessionTargets?: () => boolean;
+
+  handleInput(data: string): void {
+    if (shouldOpenSessionMenuOnLeft(
+      data, this.getText(), this.isShowingAutocomplete(), this.hasSessionTargets?.() ?? false,
+    )) {
+      this.onOpenSessionMenu?.();
+      return;
+    }
+    super.handleInput(data);
+  }
 }
 
 function updateWidget() {
@@ -894,6 +922,7 @@ export const __test__ = {
   borderLine,
   getShellReadyDelayMs,
   renderSubagentWidgetLines,
+  shouldOpenSessionMenuOnLeft,
   loadAgentDefaults,
   discoverAgentDefinitions,
   resolveEffectiveSessionMode,
@@ -1139,6 +1168,10 @@ async function launchSubagent(
   envParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
   envParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
   envParts.push(`PI_SUBAGENT_SURFACE=${shellEscape(surface)}`);
+  const parentZmx = getMuxBackend() === "zmx" ? currentZmxSession() : null;
+  if (parentZmx) {
+    envParts.push(`PI_SUBAGENT_PARENT_ZMX_SESSION=${shellEscape(parentZmx)}`);
+  }
   const envPrefix = envParts.join(" ") + " ";
 
   // Pass task and skill prompts to the sub-agent.
@@ -1355,14 +1388,88 @@ async function watchSubagent(
   }
 }
 
+async function showSubagentSessionMenu(ctx: ExtensionContext): Promise<void> {
+  if (ctx.mode !== "tui") {
+    ctx.ui.notify("ZMX switching is available only in Pi's interactive terminal UI.", "warning");
+    return;
+  }
+  if (getMuxBackend() !== "zmx") {
+    ctx.ui.notify("Session switching is available only with the zmx backend.", "warning");
+    return;
+  }
+
+  const choices = new Map<string, { surface: string; id?: string }>();
+  const parent = parentZmxSession();
+  if (parent && parent !== currentZmxSession()) {
+    choices.set(`← Back to parent (${parent})`, { surface: parent });
+  }
+  for (const running of runningSubagents.values()) {
+    const agent = running.agent ? ` (${running.agent})` : "";
+    choices.set(`${running.name}${agent} · ${running.surface}`, {
+      surface: running.surface, id: running.id,
+    });
+  }
+  if (choices.size === 0) {
+    ctx.ui.notify("No running subagents.", "info");
+    return;
+  }
+
+  const selected = await ctx.ui.select("ZMX sessions — Enter: switch · Esc: cancel", [...choices.keys()]);
+  if (!selected) return;
+  const target = choices.get(selected);
+  if (!target) return;
+  if (target.id && runningSubagents.get(target.id)?.surface !== target.surface) {
+    ctx.ui.notify("That subagent finished while the menu was open.", "warning");
+    return;
+  }
+  if (!currentZmxSession()) {
+    ctx.ui.notify(
+      `Start Pi inside zmx to switch here; from another terminal use: zmx attach ${target.surface}`,
+      "warning",
+    );
+    return;
+  }
+  try {
+    switchZmxSession(target.surface);
+  } catch (error) {
+    ctx.ui.notify(`Cannot switch session: ${error instanceof Error ? error.message : String(error)}`, "error");
+  }
+}
+
 export default function subagentsExtension(pi: ExtensionAPI) {
-  // Capture the UI context for widget updates
+  let installedEditorFactory: unknown;
+
+  // Capture the UI context for widget updates and enable an empty-input Left
+  // key without stealing cursor movement or input from other focused dialogs.
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
+    const ui = ctx.ui as typeof ctx.ui & { getEditorComponent?: () => unknown };
+    if (ctx.mode !== "tui" || getMuxBackend() !== "zmx" || ui.getEditorComponent?.()) return;
+
+    const factory = (tui: any, theme: any, keybindings: any) => {
+      const editor = new SubagentNavigationEditor(tui, theme, keybindings);
+      editor.hasSessionTargets = () => runningSubagents.size > 0 || !!parentZmxSession();
+      editor.onOpenSessionMenu = () => {
+        void showSubagentSessionMenu(ctx).catch((error) =>
+          ctx.ui.notify(
+            `Cannot open session menu: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          ),
+        );
+      };
+      return editor;
+    };
+    ctx.ui.setEditorComponent(factory);
+    installedEditorFactory = factory;
   });
 
   // Clean up on session shutdown
-  pi.on("session_shutdown", (_event, _ctx) => {
+  pi.on("session_shutdown", (_event, ctx) => {
+    const ui = ctx.ui as typeof ctx.ui & { getEditorComponent?: () => unknown };
+    if (installedEditorFactory && ui.getEditorComponent?.() === installedEditorFactory) {
+      ctx.ui.setEditorComponent(undefined);
+    }
+    installedEditorFactory = undefined;
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;
@@ -1841,6 +1948,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         resumeEnvParts.push(`PI_SUBAGENT_SESSION=${shellEscape(params.sessionPath)}`);
         resumeEnvParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
         resumeEnvParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
+        const parentZmx = getMuxBackend() === "zmx" ? currentZmxSession() : null;
+        if (parentZmx) {
+          resumeEnvParts.push(`PI_SUBAGENT_PARENT_ZMX_SESSION=${shellEscape(parentZmx)}`);
+        }
         if (autoExit) {
           resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
         }
@@ -1974,22 +2085,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       },
     });
 
-  // Show attachable sessions without switching the parent Pi's terminal away.
+  // The widget stays passive; this selector owns focus and keyboard navigation.
+  pi.registerShortcut(Key.ctrlAlt("a"), {
+    description: "Select an active subagent zmx session (or return to parent)",
+    handler: showSubagentSessionMenu,
+  });
   pi.registerCommand("subagent-sessions", {
-    description: "List running subagents and their zmx attach commands",
-    handler: async (_args, ctx) => {
-      const runs = [...runningSubagents.values()];
-      if (runs.length === 0) {
-        ctx.ui.notify("No running subagents.", "info");
-        return;
-      }
-      const lines = runs.map((run) =>
-        getMuxBackend() === "zmx"
-          ? `${run.name}: zmx attach ${run.surface}`
-          : `${run.name}: ${run.surface}`,
-      );
-      ctx.ui.notify(lines.join("\n"), "info");
-    },
+    description: "Open the active-subagent zmx session switcher",
+    handler: async (_args, ctx) => showSubagentSessionMenu(ctx),
   });
 
   // /iterate command — fork the session into a subagent

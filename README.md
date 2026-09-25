@@ -47,7 +47,8 @@ tmux new -A -s pi 'pi'
 zellij --session pi   # then run: pi
 # or
 # just run pi inside WezTerm — no wrapper needed
-# or run pi inside Ghostty with zmx installed; `zmx attach pi` for a persistent main session
+# or in Ghostty, use a named zmx session for the parent Pi (needed for in-place switching)
+zmx attach pi  # then run: pi
 ```
 
 Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij|wezterm|zmx` to force a specific backend.
@@ -62,17 +63,19 @@ Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch 
 
 ### Detached zmx sessions in Ghostty
 
-Install `zmx`, then start Pi in Ghostty (`zmx attach pi` is optional, but keeps the parent session alive). Ghostty has no portable CLI for opening a split, so this backend starts agents **headlessly** with `zmx run` instead of keyboard automation or tmux. It is auto-detected when `TERM` contains `ghostty` or Pi is inside a zmx session; otherwise set `PI_SUBAGENT_MUX=zmx` explicitly. Set it explicitly if another installed multiplexer would otherwise take priority.
+Install zmx **0.5.0+** (0.8.1 recommended) and start Pi inside a named Ghostty session (`zmx attach pi`, then `pi`). Ghostty has no portable CLI for opening a split, so this backend creates a detached zmx session and sends the child command to its PTY, without keyboard automation or tmux. It is auto-detected when `TERM` contains `ghostty` or Pi is inside a zmx session; otherwise set `PI_SUBAGENT_MUX=zmx` explicitly. Set it explicitly if another installed multiplexer would otherwise take priority.
 
-Each run gets a unique `pi-subagent-…` session. Use `/subagent-sessions` in the parent Pi to see live names, then `zmx attach pi-subagent-…` from a shell in a second Ghostty tab/window to interact with one. `zmx list --short` also shows the names. If you set `ZMX_SESSION_PREFIX` in your shell, unset it when attaching (`env -u ZMX_SESSION_PREFIX zmx attach <name>`); this extension deliberately creates unprefixed session names. **Do not launch `zmx attach` as a subprocess from inside the parent zmx session**: nested attach switches that terminal away from the parent; use another terminal or intentionally switch at a shell prompt. Finishing an agent closes its zmx session, as other backends close its pane. The Pi session file remains available for resume.
+Each run gets a unique `pi-subagent-…` session. **Press Left when Pi's main input is empty** (not while a question or menu is focused), **Ctrl+Alt+A**, or run `/subagent-sessions` to open a navigable list of running agents. Enter switches this Ghostty terminal into the selected agent via zmx's nested-session switch; the parent Pi keeps working in its detached session. Left still moves the text cursor when the editor contains text. The menu does not replace your footer. In a child Pi, choose **Back to parent** from the same menu, or run `/subagent-back`.
 
-`subagent_interrupt` requires a recent zmx with `zmx send` (raw PTY input); older versions such as 0.4.1 can spawn/watch/attach agents but cannot deliver Escape, and return an explicit upgrade error. Nothing in this backend launches or depends on Ghostty itself, so it also works over SSH or in a headless shell.
+This switch requires the parent Pi to run inside zmx. When Pi is outside a zmx session, the menu tells you how to attach from a second terminal rather than hijacking Pi's terminal. `zmx list --short` also shows session names. If you set `ZMX_SESSION_PREFIX` in your shell, unset it when attaching manually (`env -u ZMX_SESSION_PREFIX zmx attach <name>`); this extension creates unprefixed child names. Finishing an agent closes its zmx session, as other backends close its pane; if it exits while you're viewing it, reattach the parent with `zmx attach pi` from a shell. The Pi session file remains available for resume.
+
+Zmx 0.4.1 can spawn detached agents but **cannot** switch between them or deliver Escape for `subagent_interrupt`; use 0.5.0+ for nested switching and a version with `zmx send` (0.8.1 recommended) for interactive input. Nothing in this backend launches or depends on Ghostty itself, so it also works over SSH or in a headless shell.
 
 ## What's Included
 
 ### Extensions
 
-**Subagents** — 4 main-session tools + 3 commands, plus 1 subagent-only tool:
+**Subagents** — main-session tools and commands, plus child-only controls:
 
 | Tool                 | Description                                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------- |
@@ -85,7 +88,8 @@ Each run gets a unique `pi-subagent-…` session. Use `/subagent-sessions` in th
 | -------------------------- | ------------------------------------ |
 | `/iterate`                 | Fork into a subagent for quick fixes |
 | `/subagent <agent> <task>` | Spawn a named agent directly         |
-| `/subagent-sessions`       | List live zmx attach commands        |
+| `/subagent-sessions`       | Select a live zmx session (also Left on empty input or Ctrl+Alt+A) |
+| `/subagent-back`           | Return from a child Pi to its parent zmx session |
 
 ### Bundled Agents
 
@@ -462,7 +466,7 @@ tmux new -A -s pi 'pi'
 zellij --session pi   # then run: pi
 # or
 # just run pi inside WezTerm
-# or run pi inside Ghostty with zmx installed
+# or in Ghostty: zmx attach pi, then run pi
 ```
 
 Optional backend override:

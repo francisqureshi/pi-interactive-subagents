@@ -8,6 +8,7 @@ import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
+import { parentZmxSession, switchZmxSession } from "./zmx-navigation.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
@@ -85,6 +86,23 @@ export default function (pi: ExtensionAPI) {
   const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
   const deniedToolsValue = process.env.PI_DENY_TOOLS;
   const autoExit = process.env.PI_SUBAGENT_AUTO_EXIT === "1";
+  const parentSession = parentZmxSession();
+  if (parentSession) {
+    pi.registerCommand("subagent-back", {
+      description: "Switch this terminal back to the parent Pi's zmx session",
+      handler: async (_args, ctx) => {
+        if (ctx.mode !== "tui") {
+          ctx.ui.notify("Switching sessions requires an interactive terminal.", "warning");
+          return;
+        }
+        try {
+          switchZmxSession(parentSession);
+        } catch (error) {
+          ctx.ui.notify(`Cannot return to parent: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+      },
+    });
+  }
   const recorder = createSubagentActivityRecorder({
     runningChildId: process.env.PI_SUBAGENT_ID,
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
@@ -130,8 +148,9 @@ export default function (pi: ExtensionAPI) {
               ? theme.fg("dim", " · ") + theme.fg("error", `${denied.length} denied`)
               : "";
           const hint = theme.fg("muted", "  (Ctrl+J to expand)");
+          const backHint = parentSession ? theme.fg("muted", "  (← /subagent-back)") : "";
 
-          const content = new Text(`${agentTag}${countInfo}${deniedInfo}${hint}`, 0, 0);
+          const content = new Text(`${agentTag}${countInfo}${deniedInfo}${hint}${backHint}`, 0, 0);
           box.addChild(content);
         }
 
