@@ -105,12 +105,50 @@ test("zmx: split API creates a separate attachable session", { skip: !installed 
 });
 
 test("zmx: switching refuses missing sessions rather than creating them", { skip: !installed }, () => {
-  process.env.ZMX_SESSION = "test-parent";
-  assert.throws(() => switchZmxSession("not-running"), /has ended/);
-  const sessions = execFileSync("zmx", ["list", "--short"], {
-    encoding: "utf8", env: { ...process.env, ZMX_SESSION_PREFIX: "" },
-  });
-  assert.ok(!sessions.split("\n").includes("not-running"));
+  const sshConnection = process.env.SSH_CONNECTION;
+  delete process.env.SSH_CONNECTION;
+  try {
+    process.env.ZMX_SESSION = "test-parent";
+    assert.throws(() => switchZmxSession("not-running"), /has ended/);
+    const sessions = execFileSync("zmx", ["list", "--short"], {
+      encoding: "utf8", env: { ...process.env, ZMX_SESSION_PREFIX: "" },
+    });
+    assert.ok(!sessions.split("\n").includes("not-running"));
+  } finally {
+    if (sshConnection === undefined) delete process.env.SSH_CONNECTION;
+    else process.env.SSH_CONNECTION = sshConnection;
+  }
+});
+
+test("zmx: refuses to switch a session without exactly one attached client", { skip: !installed }, () => {
+  const sshConnection = process.env.SSH_CONNECTION;
+  delete process.env.SSH_CONNECTION;
+  const current = createSurface("Detached parent");
+  const target = createSurface("Detached child");
+  surfaces.push(current, target);
+  try {
+    process.env.ZMX_SESSION = current;
+    assert.throws(() => switchZmxSession(target), /expected one attached client, found 0/);
+  } finally {
+    if (sshConnection === undefined) delete process.env.SSH_CONNECTION;
+    else process.env.SSH_CONNECTION = sshConnection;
+  }
+});
+
+test("zmx: refuses remote zmosh switches before contacting the session leader", () => {
+  const sshConnection = process.env.SSH_CONNECTION;
+  const sshTty = process.env.SSH_TTY;
+  process.env.ZMX_SESSION = "remote-session";
+  process.env.SSH_CONNECTION = "127.0.0.1 1234 127.0.0.1 22";
+  delete process.env.SSH_TTY;
+  try {
+    assert.throws(() => switchZmxSession("child"), /remote zmosh attachment is not supported/);
+  } finally {
+    if (sshConnection === undefined) delete process.env.SSH_CONNECTION;
+    else process.env.SSH_CONNECTION = sshConnection;
+    if (sshTty === undefined) delete process.env.SSH_TTY;
+    else process.env.SSH_TTY = sshTty;
+  }
 });
 
 test("zmx: older releases reject interrupt rather than sending Escape to a shell", { skip: !installed }, () => {

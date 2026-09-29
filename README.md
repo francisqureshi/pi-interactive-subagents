@@ -69,7 +69,9 @@ Each run gets a unique `pi-subagent-…` session. **Press Left when Pi's main in
 
 This switch requires the parent Pi to run inside zmx. When Pi is outside a zmx session, the menu tells you how to attach from a second terminal rather than hijacking Pi's terminal. `zmx list --short` also shows session names. If you set `ZMX_SESSION_PREFIX` in your shell, unset it when attaching manually (`env -u ZMX_SESSION_PREFIX zmx attach <name>`); this extension creates unprefixed child names. Finishing an agent closes its zmx session, as other backends close its pane; if it exits while you're viewing it, reattach the parent with `zmx attach pi` from a shell. The Pi session file remains available for resume.
 
-Zmx 0.4.1 can spawn detached agents but **cannot** switch between them or deliver Escape for `subagent_interrupt`; use 0.5.0+ for nested switching and a version with `zmx send` (0.8.1 recommended) for interactive input. Nothing in this backend launches or depends on Ghostty itself, so it also works over SSH or in a headless shell.
+Zmx 0.4.1 can spawn detached agents but **cannot** switch between them or deliver Escape for `subagent_interrupt`; use 0.5.0+ for nested switching and a version with `zmx send` (0.8.1 recommended) for interactive input. Nothing in this backend launches or depends on Ghostty itself, so detached agents also work over SSH or in a headless shell. Switching requires exactly one attached zmx client in the current session: zmx switches the session leader, so the menu refuses to switch if multiple clients could move someone else's terminal.
+
+**Remote zmosh limitation:** The contributed `zmosh` in [zmx PR #271](https://github.com/neurosnap/zmx/pull/271) explicitly does not support switching from inside a remote attachment. Use this menu in a locally attached zmx terminal, not over `zmosh`; reconnect to remote sessions from your local shell instead. The extension rejects switches from SSH sessions without a TTY (the PR's bootstrap mode), but cannot reliably identify every remote attachment to a previously created session.
 
 ## What's Included
 

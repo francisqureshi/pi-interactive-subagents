@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Key, visibleWidth } from "@mariozechner/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import subagentDoneExtension from "../pi-extension/subagents/subagent-done.ts";
-import { parseZmxVersion } from "../pi-extension/subagents/zmx-navigation.ts";
+import { parseZmxVersion, parseZmxClientCount } from "../pi-extension/subagents/zmx-navigation.ts";
 
 import {
   getLeafId,
@@ -1353,6 +1353,16 @@ describe("commands", () => {
     assert.deepEqual(parseZmxVersion("zmx\t0.4.1\n"), { major: 0, minor: 4 });
     assert.deepEqual(parseZmxVersion("zmx\t0.8.1\n"), { major: 0, minor: 8 });
     assert.equal(parseZmxVersion("invalid"), null);
+  });
+
+  it("reads only the exact current session's attached-client count", () => {
+    const list = "  name=pi-subagent\tpid=1\tclients=1\tcreated=0\n" +
+      "→ name=pi\tpid=2\tclients=2\tcreated=0\n" +
+      "  name=stale\terr=ConnectionRefused\tstatus=cleaning up\n";
+    assert.equal(parseZmxClientCount(list, "pi"), 2);
+    assert.equal(parseZmxClientCount(list, "pi-subagent"), 1);
+    assert.equal(parseZmxClientCount(list, "stale"), null);
+    assert.equal(parseZmxClientCount(list, "missing"), null);
   });
 
   it("registers a keyboard shortcut for the active-session selector", () => {
