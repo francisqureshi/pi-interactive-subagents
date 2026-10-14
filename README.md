@@ -65,7 +65,7 @@ Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch 
 
 Install zmx **0.5.0+** (0.8.1 recommended) and start Pi inside a named Ghostty session (`zmx attach pi`, then `pi`). Ghostty has no portable CLI for opening a split, so this backend creates a detached zmx session and sends the child command to its PTY, without keyboard automation or tmux. It is auto-detected when `TERM` contains `ghostty` or Pi is inside a zmx session; otherwise set `PI_SUBAGENT_MUX=zmx` explicitly. Set it explicitly if another installed multiplexer would otherwise take priority.
 
-Each run gets a unique `pi-subagent-…` session. **Press Left when Pi's main input is empty** (not while a question or menu is focused), **Ctrl+Alt+A**, or run `/subagent-sessions` to open a navigable list of running agents. Enter switches this Ghostty terminal into the selected agent via zmx's nested-session switch; the parent Pi keeps working in its detached session. Left still moves the text cursor when the editor contains text. The menu does not replace your footer. In a child Pi, choose **Back to parent** from the same menu, or run `/subagent-back`.
+Each run gets a unique `pi-subagent-…` session. **Press Left when Pi's main input is empty** (not while a question or menu is focused), **Ctrl+Alt+A**, or run `/subagent-sessions` to open a navigable list of running agents. Enter switches this Ghostty terminal into the selected agent via zmx's nested-session switch; the parent Pi keeps working in its detached session. Left still moves the text cursor when the editor contains text. This composes with custom editors such as Powerline and leaves their styling intact; dialogs and autocomplete retain their own keys. The management list supports **Enter** to switch and **Ctrl+K** to kill the selected subagent after confirmation. Killing closes its session, cancels its watcher, and clears the running widget; saved session history is kept for resume. **Back to parent** cannot be killed. In a child Pi, choose **Back to parent** from the same menu, or run `/subagent-back`.
 
 This switch requires the parent Pi to run inside zmx. When Pi is outside a zmx session, the menu tells you how to attach from a second terminal rather than hijacking Pi's terminal. `zmx list --short` also shows session names. If you set `ZMX_SESSION_PREFIX` in your shell, unset it when attaching manually (`env -u ZMX_SESSION_PREFIX zmx attach <name>`); this extension creates unprefixed child names. Finishing an agent closes its zmx session, as other backends close its pane; if it exits while you're viewing it, reattach the parent with `zmx attach pi` from a shell. The Pi session file remains available for resume.
 
@@ -90,7 +90,7 @@ Zmx 0.4.1 can spawn detached agents but **cannot** switch between them or delive
 | -------------------------- | ------------------------------------ |
 | `/iterate`                 | Fork into a subagent for quick fixes |
 | `/subagent <agent> <task>` | Spawn a named agent directly         |
-| `/subagent-sessions`       | Select a live zmx session (also Left on empty input or Ctrl+Alt+A) |
+| `/subagent-sessions`       | Manage live zmx agents: Enter to switch, Ctrl+K to kill (also Left on empty input or Ctrl+Alt+A) |
 | `/subagent-back`           | Return from a child Pi to its parent zmx session |
 
 ### Bundled Agents
@@ -206,7 +206,7 @@ subagent_interrupt({ name: "Scout" });
 
 This sends Escape to the child pane, cancelling the in-progress model turn. The subagent session stays alive — the pane, session file, and background polling all remain intact. After the interrupt, the widget immediately moves the child back to `waiting`, and stale pre-interrupt snapshots are ignored. If the child starts work later, newer snapshots return it to `active`; completion, failure, and `caller_ping` still flow through normally.
 
-This is a turn-level interrupt, not a method for forcibly terminating a subagent session.
+This is a turn-level interrupt, not a method for forcibly terminating a subagent session. To terminate one, open the zmx management list with `/subagent-sessions` or Ctrl+Alt+A, select it, press **Ctrl+K**, and confirm. Its saved transcript is retained.
 
 > **Note:** Only Pi-backed subagents are supported. Claude-backed runs will return an error.
 

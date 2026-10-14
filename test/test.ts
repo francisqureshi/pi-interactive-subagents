@@ -1452,15 +1452,17 @@ describe("commands", () => {
       await command.handler("", {
         mode: "tui",
         ui: {
-          select: async (_title: string, choices: string[]) => {
-            options = choices;
-            return undefined; // Escape cancels without switching
-          },
+          custom: async (factory: any) => new Promise((resolve) => {
+            const component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text }, { matches: () => false }, resolve);
+            options = component.render(160);
+            component.handleInput("\u001b"); // Escape cancels without switching
+          }),
           notify() {},
         },
       });
-      assert.match(options[0], /Back to parent \(parent-session\)/);
-      assert.match(options[1], /Scout.*pi-subagent-test-navigation/);
+      assert.match(options.join("\n"), /Back to parent \(parent-session\)/);
+      assert.match(options.join("\n"), /Scout.*pi-subagent-test-navigation/);
+      assert.match(options.join("\n"), /Ctrl\+K: kill/);
     } finally {
       running.delete("test-navigation");
       restoreEnvVar("PI_SUBAGENT_MUX", previousMux);
@@ -1487,6 +1489,89 @@ describe("commands", () => {
     assert.equal(fn("\u001b[D", "", true, true), false);
     assert.equal(fn("\u001b[D", "", false, false), false);
     assert.equal(fn("\u001b[C", "", false, true), false);
+  });
+
+  it("opens the Left-arrow menu while preserving an existing custom editor", async () => {
+    const previousMux = process.env.PI_SUBAGENT_MUX;
+    process.env.PI_SUBAGENT_MUX = "zmx";
+    const running = (subagentsModule as any).__test__.runningSubagents as Map<string, any>;
+    running.set("left-test", { id: "left-test", name: "Scout", surface: "left-test-surface" });
+    const delegated: string[] = [];
+    let text = "";
+    let autocomplete = false;
+    const editor = {
+      getText: () => text,
+      isShowingAutocomplete: () => autocomplete,
+      handleInput(data: string) { delegated.push(data); },
+      render() { return ["original powerline editor"]; },
+    };
+    const previousFactory = () => editor;
+    let currentFactory: any = previousFactory;
+    let menus = 0;
+    const hooks = new Map<string, Function>();
+    const { api } = createMockExtensionApi();
+    api.on = (event: string, handler: Function) => hooks.set(event, handler);
+    (subagentsModule as any).default(api);
+    const ctx = {
+      mode: "tui", hasUI: true,
+      ui: {
+        getEditorComponent: () => currentFactory,
+        setEditorComponent: (factory: any) => { currentFactory = factory; },
+        custom: async (factory: any) => new Promise((resolve) => {
+          menus++;
+          const component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text }, { matches: () => false }, resolve);
+          component.handleInput("\u001b");
+        }),
+        notify() {},
+        setWidget() {},
+      },
+    };
+    try {
+      await hooks.get("session_start")!({}, ctx);
+      const activeEditor = currentFactory({}, {}, {});
+      assert.equal(activeEditor, editor, "keep the other extension's editor and styling");
+      activeEditor.handleInput("\u001b[D");
+      assert.equal(menus, 1, "Left on an empty custom editor should open the management menu");
+      assert.deepEqual(delegated, []);
+      text = "draft";
+      activeEditor.handleInput("\u001b[D");
+      text = "";
+      autocomplete = true;
+      activeEditor.handleInput("\u001b[D");
+      activeEditor.handleInput("x");
+      assert.equal(menus, 1);
+      assert.deepEqual(delegated, ["\u001b[D", "\u001b[D", "x"]);
+      assert.deepEqual(activeEditor.render(), ["original powerline editor"]);
+      hooks.get("session_shutdown")!({}, ctx);
+      assert.equal(currentFactory, previousFactory, "restore the previous extension's editor on reload");
+      autocomplete = false;
+      editor.handleInput("\u001b[D");
+      assert.equal(menus, 1, "old input handlers must not open dialogs after reload");
+    } finally {
+      running.delete("left-test");
+      restoreEnvVar("PI_SUBAGENT_MUX", previousMux);
+    }
+  });
+
+  it("disables editor navigation without overwriting a later extension's handler", () => {
+    const fn = (subagentsModule as any).__test__.installEditorNavigation;
+    const inputs: string[] = [];
+    let menus = 0;
+    const editor = {
+      getText: () => "",
+      handleInput(data: string) { inputs.push(data); },
+    };
+    const restore = fn(editor, () => true, () => { menus++; });
+    editor.handleInput("\u001b[D");
+    assert.equal(menus, 1);
+    const navigationInput = editor.handleInput;
+    const laterInput = (data: string) => navigationInput(data);
+    editor.handleInput = laterInput;
+    restore();
+    assert.equal(editor.handleInput, laterInput);
+    editor.handleInput("\u001b[D");
+    assert.equal(menus, 1);
+    assert.deepEqual(inputs, ["\u001b[D"]);
   });
 
   it("does not register the removed planner workflow", () => {
@@ -1745,6 +1830,89 @@ describe("subagent activity snapshots", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("subagent termination", () => {
+  const testApi = (subagentsModule as any).__test__;
+  it("closes the child before cancelling its watcher and clears the running entry", () => {
+    const abort = new AbortController();
+    const order: string[] = [];
+    abort.signal.addEventListener("abort", () => order.push("abort"));
+    testApi.runningSubagents.set("kill-test", {
+      id: "kill-test", name: "Demo", surface: "kill-surface", abortController: abort,
+    });
+    try {
+      const result = testApi.killSubagent("kill-test", (surface: string) => {
+        assert.equal(surface, "kill-surface");
+        assert.equal(abort.signal.aborted, false);
+        order.push("close");
+      });
+      assert.deepEqual(result, { id: "kill-test", name: "Demo" });
+      assert.deepEqual(order, ["close", "abort"]);
+      assert.equal(testApi.runningSubagents.has("kill-test"), false);
+    } finally {
+      testApi.runningSubagents.delete("kill-test");
+    }
+  });
+
+  it("does not remove a live child or cancel its watcher when closing fails", () => {
+    const abort = new AbortController();
+    testApi.runningSubagents.set("kill-fails", {
+      id: "kill-fails", name: "Worker", surface: "live-surface", abortController: abort,
+    });
+    try {
+      const result = testApi.killSubagent("kill-fails", () => { throw new Error("permission denied"); });
+      assert.match(result.error, /permission denied/);
+      assert.equal(testApi.runningSubagents.has("kill-fails"), true);
+      assert.equal(abort.signal.aborted, false);
+    } finally {
+      testApi.runningSubagents.delete("kill-fails");
+    }
+  });
+
+  for (const decision of ["confirm", "cancel", "finished", "replaced"] as const) {
+    it(`handles kill confirmation: ${decision}`, async () => {
+      const previousMux = process.env.PI_SUBAGENT_MUX;
+      process.env.PI_SUBAGENT_MUX = "zmx";
+      const id = "confirmation-test";
+      const abort = new AbortController();
+      testApi.runningSubagents.set(id, { id, name: "Demo", surface: "confirmation-surface", abortController: abort });
+      const notifications: string[] = [];
+      let closes = 0;
+      let confirmations = 0;
+      try {
+        await testApi.showSubagentSessionMenu({
+          mode: "tui",
+          ui: {
+            confirm: async (title: string, message: string) => {
+              confirmations++;
+              assert.match(title, /Kill.*Demo/);
+              assert.match(message, /history.*kept/);
+              if (decision === "finished") testApi.runningSubagents.delete(id);
+              if (decision === "replaced") testApi.runningSubagents.set(id, { id, name: "New demo", surface: "different-surface" });
+              return decision !== "cancel";
+            },
+            notify: (message: string) => notifications.push(message),
+          },
+        }, async (_ctx: any, targets: any[]) => ({ type: "kill", target: targets.find((target) => target.id === id) }), () => { closes++; });
+        assert.equal(confirmations, 1);
+        assert.equal(closes, decision === "confirm" ? 1 : 0);
+        assert.equal(abort.signal.aborted, decision === "confirm");
+        if (decision === "finished" || decision === "replaced") assert.match(notifications[0], /finished while confirmation/);
+        if (decision === "cancel") assert.equal(testApi.runningSubagents.has(id), true);
+      } finally {
+        testApi.runningSubagents.delete(id);
+        restoreEnvVar("PI_SUBAGENT_MUX", previousMux);
+      }
+    });
+  }
+
+  it("does not kill an agent that completed while the menu was open", () => {
+    const result = testApi.killSubagent("already-finished", () => {
+      assert.fail("must not close a stale target");
+    });
+    assert.match(result.error, /finished|no longer/i);
   });
 });
 

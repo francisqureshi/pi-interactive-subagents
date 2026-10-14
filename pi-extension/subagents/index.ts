@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { currentZmxSession, parentZmxSession, switchZmxSession } from "./zmx-navigation.ts";
+import { showManagementPicker, type ManagementTarget } from "./management.ts";
 import {
   isMuxAvailable,
   muxSetupHint,
@@ -501,6 +502,8 @@ interface RunningSubagent {
     error?: string;
   };
   abortController?: AbortController;
+  /** Prevent a watcher from closing a surface already killed from management. */
+  surfaceClosed?: boolean;
   cli?: string;
   sentinelFile?: string;
   statusState: SubagentStatusState;
@@ -630,20 +633,29 @@ function shouldOpenSessionMenuOnLeft(
   return matchesKey(data, Key.left) && editorText.length === 0 && !autocompleteOpen && hasTargets;
 }
 
-/** Receives keys only when the main editor is focused, never in question dialogs. */
-class SubagentNavigationEditor extends CustomEditor {
-  onOpenSessionMenu?: () => void;
-  hasSessionTargets?: () => boolean;
-
-  handleInput(data: string): void {
-    if (shouldOpenSessionMenuOnLeft(
-      data, this.getText(), this.isShowingAutocomplete(), this.hasSessionTargets?.() ?? false,
+/** Decorate only editor input: dialogs keep focus, and other extensions keep their editor. */
+function installEditorNavigation(
+  editor: { getText(): string; isShowingAutocomplete?(): boolean; handleInput(data: string): void },
+  hasTargets: () => boolean,
+  openMenu: () => void,
+): () => void {
+  const original = editor.handleInput;
+  let enabled = true;
+  const handleInput = (data: string) => {
+    if (enabled && shouldOpenSessionMenuOnLeft(
+      data, editor.getText(), editor.isShowingAutocomplete?.() ?? false, hasTargets(),
     )) {
-      this.onOpenSessionMenu?.();
+      openMenu();
       return;
     }
-    super.handleInput(data);
-  }
+    original.call(editor, data);
+  };
+  editor.handleInput = handleInput;
+  return () => {
+    // If a later extension wraps us, disable our closure without erasing theirs.
+    enabled = false;
+    if (editor.handleInput === handleInput) editor.handleInput = original;
+  };
 }
 
 function updateWidget() {
@@ -922,6 +934,9 @@ export const __test__ = {
   getShellReadyDelayMs,
   renderSubagentWidgetLines,
   shouldOpenSessionMenuOnLeft,
+  installEditorNavigation,
+  killSubagent,
+  showSubagentSessionMenu,
   loadAgentDefaults,
   discoverAgentDefinitions,
   resolveEffectiveSessionMode,
@@ -1324,7 +1339,10 @@ async function watchSubagent(
         try { unlinkSync(running.sentinelFile + ".transcript"); } catch {}
       }
 
-      closeSurface(surface);
+      if (!running.surfaceClosed) {
+        closeSurface(surface);
+        running.surfaceClosed = true;
+      }
       runningSubagents.delete(running.id);
 
       return { name, task, summary, exitCode: result.exitCode, elapsed, ...(sessionId ? { claudeSessionId: sessionId } : {}) };
@@ -1349,7 +1367,10 @@ async function watchSubagent(
           : "Sub-agent exited without output";
     }
 
-    closeSurface(surface);
+    if (!running.surfaceClosed) {
+      closeSurface(surface);
+      running.surfaceClosed = true;
+    }
     runningSubagents.delete(running.id);
 
     return {
@@ -1363,9 +1384,13 @@ async function watchSubagent(
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
     };
   } catch (err: any) {
-    try {
-      closeSurface(surface);
-    } catch {}
+    // A management-list kill already closed this surface and removed its entry.
+    if (!running.surfaceClosed) {
+      try {
+        closeSurface(surface);
+        running.surfaceClosed = true;
+      } catch {}
+    }
     runningSubagents.delete(running.id);
 
     if (signal.aborted) {
@@ -1390,7 +1415,31 @@ async function watchSubagent(
   }
 }
 
-async function showSubagentSessionMenu(ctx: ExtensionContext): Promise<void> {
+/** Explicit session termination, unlike the turn-only Escape interrupt. */
+function killSubagent(
+  id: string,
+  close: (surface: string) => void = closeSurface,
+): { id: string; name: string } | { error: string } {
+  const running = runningSubagents.get(id);
+  if (!running) return { error: "That subagent has finished or is no longer running." };
+  try {
+    close(running.surface);
+    running.surfaceClosed = true;
+  } catch (error) {
+    return { error: `Cannot kill ${running.name}: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  // Let the existing watcher deliver the normal cancelled result to the parent.
+  running.abortController?.abort();
+  runningSubagents.delete(id);
+  updateWidget();
+  return { id, name: running.name };
+}
+
+async function showSubagentSessionMenu(
+  ctx: ExtensionContext,
+  choose: typeof showManagementPicker = showManagementPicker,
+  close: (surface: string) => void = closeSurface,
+): Promise<void> {
   if (ctx.mode !== "tui") {
     ctx.ui.notify("ZMX switching is available only in Pi's interactive terminal UI.", "warning");
     return;
@@ -1400,28 +1449,46 @@ async function showSubagentSessionMenu(ctx: ExtensionContext): Promise<void> {
     return;
   }
 
-  const choices = new Map<string, { surface: string; id?: string }>();
+  const targets: ManagementTarget[] = [];
   const parent = parentZmxSession();
   if (parent && parent !== currentZmxSession()) {
-    choices.set(`← Back to parent (${parent})`, { surface: parent });
+    targets.push({ label: `← Back to parent (${parent})`, surface: parent });
   }
   for (const running of runningSubagents.values()) {
     const agent = running.agent ? ` (${running.agent})` : "";
-    choices.set(`${running.name}${agent} · ${running.surface}`, {
+    targets.push({
+      label: `${running.name}${agent} · ${running.surface}`,
       surface: running.surface, id: running.id,
     });
   }
-  if (choices.size === 0) {
+  if (targets.length === 0) {
     ctx.ui.notify("No running subagents.", "info");
     return;
   }
 
-  const selected = await ctx.ui.select("ZMX sessions — Enter: switch · Esc: cancel", [...choices.keys()]);
-  if (!selected) return;
-  const target = choices.get(selected);
-  if (!target) return;
+  const action = await choose(ctx, targets);
+  if (!action) return;
+  const { target } = action;
   if (target.id && runningSubagents.get(target.id)?.surface !== target.surface) {
     ctx.ui.notify("That subagent finished while the menu was open.", "warning");
+    return;
+  }
+  if (action.type === "kill") {
+    if (!target.id) return; // Back-to-parent is never a kill target.
+    const running = runningSubagents.get(target.id)!;
+    const confirmed = await ctx.ui.confirm(
+      `Kill subagent "${running.name}"?`,
+      "Stop its processes and cancel its watcher? Saved session history will be kept.",
+    );
+    if (!confirmed) return;
+    // Confirmation is asynchronous: do not kill a completed or replaced target.
+    if (runningSubagents.get(target.id)?.surface !== target.surface) {
+      ctx.ui.notify("That subagent finished while confirmation was open.", "warning");
+      return;
+    }
+    const result = killSubagent(target.id, close);
+    if ("error" in result) ctx.ui.notify(result.error, "error");
+    else ctx.ui.notify(`Killed subagent "${result.name}". Session history was kept.`, "info");
     return;
   }
   if (!currentZmxSession()) {
@@ -1439,26 +1506,36 @@ async function showSubagentSessionMenu(ctx: ExtensionContext): Promise<void> {
 }
 
 export default function subagentsExtension(pi: ExtensionAPI) {
-  let installedEditorFactory: unknown;
+  type EditorFactory = (tui: any, theme: any, keybindings: any) => any;
+  let installedEditorFactory: EditorFactory | undefined;
+  let previousEditorFactory: EditorFactory | undefined;
+  const restoreEditorNavigation: Array<() => void> = [];
 
-  // Capture the UI context for widget updates and enable an empty-input Left
-  // key without stealing cursor movement or input from other focused dialogs.
+  // Compose with the current editor (e.g. Powerline) instead of skipping it.
+  // Only the focused editor sees these keys; question dialogs stay untouched.
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
-    const ui = ctx.ui as typeof ctx.ui & { getEditorComponent?: () => unknown };
-    if (ctx.mode !== "tui" || getMuxBackend() !== "zmx" || ui.getEditorComponent?.()) return;
+    const ui = ctx.ui as typeof ctx.ui & { getEditorComponent?: () => EditorFactory | undefined };
+    if (ctx.mode !== "tui" || getMuxBackend() !== "zmx") return;
+    const previous = ui.getEditorComponent?.();
+    previousEditorFactory = previous;
 
-    const factory = (tui: any, theme: any, keybindings: any) => {
-      const editor = new SubagentNavigationEditor(tui, theme, keybindings);
-      editor.hasSessionTargets = () => runningSubagents.size > 0 || !!parentZmxSession();
-      editor.onOpenSessionMenu = () => {
-        void showSubagentSessionMenu(ctx).catch((error) =>
-          ctx.ui.notify(
-            `Cannot open session menu: ${error instanceof Error ? error.message : String(error)}`,
-            "error",
-          ),
-        );
-      };
+    const factory: EditorFactory = (tui, theme, keybindings) => {
+      const editor = previous
+        ? previous(tui, theme, keybindings)
+        : new CustomEditor(tui, theme, keybindings);
+      restoreEditorNavigation.push(installEditorNavigation(
+        editor,
+        () => runningSubagents.size > 0 || !!parentZmxSession(),
+        () => {
+          void showSubagentSessionMenu(ctx).catch((error) =>
+            ctx.ui.notify(
+              `Cannot open session menu: ${error instanceof Error ? error.message : String(error)}`,
+              "error",
+            ),
+          );
+        },
+      ));
       return editor;
     };
     ctx.ui.setEditorComponent(factory);
@@ -1468,10 +1545,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   // Clean up on session shutdown
   pi.on("session_shutdown", (_event, ctx) => {
     const ui = ctx.ui as typeof ctx.ui & { getEditorComponent?: () => unknown };
+    for (const restore of restoreEditorNavigation.splice(0).reverse()) restore();
     if (installedEditorFactory && ui.getEditorComponent?.() === installedEditorFactory) {
-      ctx.ui.setEditorComponent(undefined);
+      ctx.ui.setEditorComponent(previousEditorFactory);
     }
     installedEditorFactory = undefined;
+    previousEditorFactory = undefined;
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;
@@ -2087,11 +2166,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // The widget stays passive; this selector owns focus and keyboard navigation.
   pi.registerShortcut(Key.ctrlAlt("a"), {
-    description: "Select an active subagent zmx session (or return to parent)",
+    description: "Manage active subagent zmx sessions: switch or kill with confirmation",
     handler: showSubagentSessionMenu,
   });
   pi.registerCommand("subagent-sessions", {
-    description: "Open the active-subagent zmx session switcher",
+    description: "Open subagent zmx management (Enter: switch, Ctrl+K: kill)",
     handler: async (_args, ctx) => showSubagentSessionMenu(ctx),
   });
 

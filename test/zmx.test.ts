@@ -110,6 +110,8 @@ async function exerciseScriptedSubagent(options: {
   frontmatter?: string;
   stopReason?: "stop" | "aborted" | "error";
   staysOpen?: boolean;
+  kill?: boolean;
+  untrackBeforeAbort?: boolean;
 } = {}) {
   process.env.PI_SUBAGENT_MUX = "zmx";
   const surface = createSurface("Brief demo");
@@ -159,6 +161,7 @@ async function exerciseScriptedSubagent(options: {
     assert.ok(readFileSync(running.sessionFile, "utf8").includes("Brief demo finished."), "the child must have actually finished its turn");
     const activity = JSON.parse(readFileSync(running.activityFile!, "utf8"));
     assert.equal(activity.latestEvent, "agent_end");
+    running.abortController = abort;
     watcher = subagents.watchSubagent(running, abort.signal);
     if (options.staysOpen) {
       let settled = false;
@@ -168,6 +171,26 @@ async function exerciseScriptedSubagent(options: {
       assert.equal(activity.phase, "waiting");
       assert.equal(existsSync(running.sessionFile + ".exit"), false);
       assert.equal(subagents.runningSubagents.has(running.id), true);
+      if (options.untrackBeforeAbort) {
+        // session_shutdown clears the map immediately after aborting watchers.
+        subagents.runningSubagents.delete(running.id);
+        abort.abort();
+        await watcher;
+        assert.ok(!execFileSync("zmx", ["list", "--short"], {
+          encoding: "utf8", env: { ...process.env, ZMX_SESSION_PREFIX: "" },
+        }).split("\n").includes(surface), "shutdown must close children even after clearing the map");
+      }
+      if (options.kill) {
+        const result = subagents.killSubagent(running.id);
+        assert.ok(!("error" in result), "management termination should close the child");
+        const completion = await watcher;
+        assert.equal(completion.error, "cancelled");
+        assert.equal(subagents.runningSubagents.has(running.id), false);
+        assert.equal(existsSync(running.sessionFile), true, "killing must keep session history");
+        assert.ok(!execFileSync("zmx", ["list", "--short"], {
+          encoding: "utf8", env: { ...process.env, ZMX_SESSION_PREFIX: "" },
+        }).split("\n").includes(surface));
+      }
       return;
     }
     timeout = setTimeout(() => abort.abort(), 3_000);
@@ -185,7 +208,7 @@ async function exerciseScriptedSubagent(options: {
     clearTimeout(timeout);
     abort.abort();
     if (watcher) await watcher;
-    else { try { closeSurface(surface); } catch {} }
+    if (!running?.surfaceClosed) { try { closeSurface(surface); } catch {} }
     surfaces.pop();
     rmSync(join(testDir, "agents", "test-demo.md"), { force: true });
     if (running) {
@@ -216,6 +239,14 @@ test("zmx: fork handoffs and aborted turns stay open", { skip: !installed }, asy
 
 test("zmx: auto-exit failures reach the parent with their error message", { skip: !installed }, async () => {
   await exerciseScriptedSubagent({ stopReason: "error" });
+});
+
+test("zmx: management termination closes the session, cancels its watcher, and keeps history", { skip: !installed }, async () => {
+  await exerciseScriptedSubagent({ params: { autoExit: false }, staysOpen: true, kill: true });
+});
+
+test("zmx: parent shutdown closes children after clearing the running map", { skip: !installed }, async () => {
+  await exerciseScriptedSubagent({ params: { autoExit: false }, staysOpen: true, untrackBeforeAbort: true });
 });
 
 test("zmx: split API creates a separate attachable session", { skip: !installed }, () => {
