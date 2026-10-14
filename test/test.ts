@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -941,20 +941,44 @@ describe("subagent discovery", () => {
       testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: true }),
       false,
     );
-    // Agents without auto-exit ARE interactive — parent does not receive status transition pings.
+    // Explicitly non-auto-exit agents are interactive — no status transition pings.
     assert.equal(
       testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: false }),
       true,
     );
     assert.equal(
       testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, {}),
-      true,
+      false,
     );
-    // Bare spawn with no agent defs (e.g. /iterate fork) is interactive by default.
+    // Bare tasks are autonomous; fork handoffs remain interactive by default.
     assert.equal(
       testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, null),
+      false,
+    );
+    assert.equal(
+      testApi.resolveEffectiveInteractive({ name: "A", task: "T", fork: true }, null),
       true,
     );
+    assert.equal(
+      testApi.resolveEffectiveInteractive({ name: "A", task: "T", autoExit: false }, null),
+      true,
+    );
+  });
+
+  it("defaults task agents to auto-exit while preserving fork handoffs and opt-outs", () => {
+    const params = { name: "Demo", task: "T" };
+    assert.equal(testApi.resolveEffectiveAutoExit(params, null), true);
+    assert.equal(testApi.resolveEffectiveAutoExit(params, {}), true);
+    assert.equal(testApi.resolveEffectiveAutoExit(params, { sessionMode: "lineage-only" }), true);
+    assert.equal(testApi.resolveEffectiveAutoExit({ ...params, fork: true }, null), false);
+    assert.equal(testApi.resolveEffectiveAutoExit(params, { sessionMode: "fork" }), false);
+    assert.equal(testApi.resolveEffectiveAutoExit(params, { autoExit: false }), false);
+    assert.equal(testApi.resolveEffectiveAutoExit({ ...params, autoExit: false }, { autoExit: true }), false);
+    assert.equal(testApi.resolveEffectiveAutoExit({ ...params, autoExit: true }, { autoExit: false }), true);
+    assert.equal(testApi.resolveEffectiveAutoExit({ ...params, fork: true }, { autoExit: true }), true);
+    assert.equal(testApi.resolveEffectiveAutoExit({ ...params, fork: true, autoExit: true }, null), true);
+    // interactive affects status notifications only, not the exit policy.
+    assert.equal(testApi.resolveEffectiveAutoExit({ ...params, interactive: true }, null), true);
   });
 
   it("resolveEffectiveInteractive honors explicit frontmatter over the auto-exit default", () => {
@@ -1258,6 +1282,47 @@ describe("subagent-done.ts", () => {
     });
   });
 
+  describe("auto-exit completion sidecar", () => {
+    const cases = [
+      { name: "normal completion", autoExit: "1", stopReason: "stop", expected: { type: "done" }, exits: 1 },
+      { name: "provider failure", autoExit: "1", stopReason: "error", expected: { type: "error", errorMessage: "529 overloaded", stopReason: "error" }, exits: 1 },
+      { name: "Escape abort", autoExit: "1", stopReason: "aborted", expected: undefined, exits: 0 },
+      { name: "explicit opt-out", autoExit: "0", stopReason: "stop", expected: undefined, exits: 0 },
+      { name: "caller_ping", autoExit: "1", stopReason: "stop", prior: { type: "ping", name: "Demo", message: "Help" }, expected: { type: "ping", name: "Demo", message: "Help" }, exits: 1 },
+    ];
+    for (const c of cases) {
+      it(`handles ${c.name} without losing its exit reason`, () => {
+        withTempDir((dir) => {
+          const keys = ["PI_SUBAGENT_AUTO_EXIT", "PI_SUBAGENT_SESSION", "PI_SUBAGENT_ACTIVITY_FILE"];
+          const previous = keys.map((key) => process.env[key]);
+          const session = join(dir, "child.jsonl");
+          process.env.PI_SUBAGENT_AUTO_EXIT = c.autoExit;
+          process.env.PI_SUBAGENT_SESSION = session;
+          delete process.env.PI_SUBAGENT_ACTIVITY_FILE;
+          try {
+            if (c.prior) writeFileSync(session + ".exit", JSON.stringify(c.prior));
+            const handlers = new Map<string, Function>();
+            const { api } = createMockExtensionApi();
+            api.on = (event: string, handler: Function) => handlers.set(event, handler);
+            subagentDoneExtension(api);
+            let exits = 0;
+            handlers.get("agent_end")!({ messages: [{ role: "assistant", stopReason: c.stopReason, errorMessage: "529 overloaded" }] }, {
+              shutdown() { exits++; },
+            });
+            assert.equal(exits, c.exits);
+            if (c.expected) {
+              assert.deepEqual(JSON.parse(readFileSync(session + ".exit", "utf8")), c.expected);
+            } else {
+              assert.equal(existsSync(session + ".exit"), false);
+            }
+          } finally {
+            keys.forEach((key, index) => restoreEnvVar(key, previous[index]));
+          }
+        });
+      });
+    }
+  });
+
   describe("findLatestAssistantError", () => {
     it("returns the error info from a stopReason=error message", () => {
       const messages = [
@@ -1488,6 +1553,14 @@ describe("tool registration", () => {
     const output = rendered.render(80).join("\n");
 
     assert.match(output, /\(unnamed\)/);
+  });
+
+  it("registers subagent with an autoExit override", () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const tool = registeredTools.find((tool) => tool.name === "subagent");
+    assert.equal(tool.parameters.properties.autoExit.type, "boolean");
+    assert.match(tool.parameters.properties.autoExit.description, /fork/i);
   });
 
   it("registers subagent_resume with an autoExit override", () => {

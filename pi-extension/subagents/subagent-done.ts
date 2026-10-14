@@ -6,7 +6,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
 import { parentZmxSession, switchZmxSession } from "./zmx-navigation.ts";
 
@@ -195,26 +195,21 @@ export default function (pi: ExtensionAPI) {
     const shouldExit = autoExit && shouldAutoExitOnAgentEnd(userTookOver, messages);
 
     if (shouldExit) {
-      // Surface stopReason: "error" turns (auto-retry exhausted, provider
-      // overload, etc.) to the parent via the .exit sidecar so the watcher
-      // can report a clear failure with the underlying error message.
-      // Without this the parent would only see exit code 0 and a stale
-      // assistant message, mistaking the crash for a successful completion.
+      // Publish completion before shutdown so the parent need not find a shell
+      // sentinel in terminal scrollback. Preserve caller_ping/subagent_done's
+      // sidecar if a tool already requested shutdown during this turn.
       const errorInfo = findLatestAssistantError(messages);
       const sessionFile = process.env.PI_SUBAGENT_SESSION;
-      if (errorInfo && sessionFile) {
+      if (sessionFile) {
         try {
-          writeFileSync(
-            `${sessionFile}.exit`,
-            JSON.stringify({
-              type: "error",
-              errorMessage: errorInfo.errorMessage,
-              stopReason: errorInfo.stopReason,
-            }),
-          );
+          const exitFile = `${sessionFile}.exit`;
+          if (!existsSync(exitFile)) {
+            writeFileSync(exitFile, JSON.stringify(errorInfo
+              ? { type: "error", ...errorInfo }
+              : { type: "done" }));
+          }
         } catch {
-          // Best effort — even without the sidecar, watcher's session-file
-          // fallback can still recover the errorMessage.
+          // Best effort — the shell sentinel remains a fallback.
         }
       }
 

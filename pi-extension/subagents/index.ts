@@ -114,10 +114,16 @@ const SubagentParams = Type.Object({
         "Force the full-context fork mode for this spawn. The sub-agent inherits the current session conversation, overriding any agent frontmatter session-mode.",
     }),
   ),
+  autoExit: Type.Optional(
+    Type.Boolean({
+      description:
+        "Whether this Pi subagent should close after finishing its response. Overrides the agent's `auto-exit` frontmatter. Defaults to true for task sessions and false for full-context fork handoffs; set false for a user-driven session. Escape only interrupts the turn and leaves the session open.",
+    }),
+  ),
   interactive: Type.Optional(
     Type.Boolean({
       description:
-        "Mark the subagent as interactive (long-running, user drives the conversation in its own pane). When true, the main session is not woken by status transitions (stalled/recovered) for this subagent. If omitted, falls back to the agent's `interactive` frontmatter, otherwise the inverse of `auto-exit` (agents that auto-exit are autonomous and get stall pings; agents that don't are interactive and stay quiet).",
+        "Mark the subagent as interactive (long-running, user drives the conversation in its own pane). When true, the main session is not woken by status transitions (stalled/recovered) for this subagent. If omitted, falls back to the agent's `interactive` frontmatter, otherwise the inverse of the effective auto-exit policy (task sessions default to autonomous; fork handoffs default to interactive). This controls status notifications, not whether the session closes.",
     }),
   ),
   resumeSessionId: Type.Optional(
@@ -330,29 +336,22 @@ function resolveLaunchBehavior(
   };
 }
 
-/**
- * Decide whether a subagent is interactive (user-driven, long-running).
- *
- * Resolution order:
- *   1. Explicit `interactive` tool parameter wins.
- *   2. Explicit `interactive` frontmatter field on the agent.
- *   3. Default: the inverse of `auto-exit`. Agents that auto-exit are
- *      autonomous (scout, worker, researcher) and the parent session should be
- *      woken on stall/recovery transitions. Agents that don't auto-exit are
- *      driven by the user in their own pane (iterate/fork) and
- *      stall pings are noise.
- *
- * When no agent defs exist at all (bare `subagent({ name, task })` call,
- * typical for `/iterate` with `fork: true`), `autoExit` is undefined and the
- * subagent is treated as interactive — matching the intent of iterate.
- */
+/** Task sessions auto-exit by default; full-context forks are user handoffs. */
+function resolveEffectiveAutoExit(
+  params: Static<typeof SubagentParams>,
+  agentDefs: AgentDefaults | null,
+): boolean {
+  return params.autoExit ?? agentDefs?.autoExit ?? (resolveEffectiveSessionMode(params, agentDefs) !== "fork");
+}
+
+/** Status notification policy is independent of the session's exit policy. */
 function resolveEffectiveInteractive(
   params: Static<typeof SubagentParams>,
   agentDefs: AgentDefaults | null,
 ): boolean {
   if (params.interactive != null) return params.interactive;
   if (agentDefs?.interactive != null) return agentDefs.interactive;
-  return !(agentDefs?.autoExit ?? false);
+  return !resolveEffectiveAutoExit(params, agentDefs);
 }
 
 function loadAgentDefaults(agentName: string): AgentDefaults | null {
@@ -927,6 +926,7 @@ export const __test__ = {
   discoverAgentDefinitions,
   resolveEffectiveSessionMode,
   resolveLaunchBehavior,
+  resolveEffectiveAutoExit,
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
   buildPiPromptArgs,
@@ -938,6 +938,8 @@ export const __test__ = {
   handleSubagentInterrupt,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
+  launchSubagent,
+  watchSubagent,
   runningSubagents,
   formatElapsed,
 };
@@ -970,6 +972,7 @@ async function launchSubagent(
   const effectiveTools = params.tools ?? agentDefs?.tools;
   const effectiveSkills = params.skills ?? agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;
+  const effectiveAutoExit = resolveEffectiveAutoExit(params, agentDefs);
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
 
   const sessionFile = ctx.sessionManager.getSessionFile();
@@ -1019,10 +1022,10 @@ async function launchSubagent(
   // Build the task message
   // Only full-context fork mode inherits prior conversation state.
   // Blank-session modes need the wrapper instructions and artifact-backed handoff.
-  const modeHint = agentDefs?.autoExit
+  const modeHint = effectiveAutoExit
     ? "Complete your task autonomously."
     : "Complete your task. When finished, call the subagent_done tool. The user can interact with you at any time.";
-  const summaryInstruction = agentDefs?.autoExit
+  const summaryInstruction = effectiveAutoExit
     ? "Your FINAL assistant message should summarize what you accomplished."
     : "Your FINAL assistant message (before calling subagent_done or before the user exits) should summarize what you accomplished.";
   const denySet = resolveDenyTools(agentDefs);
@@ -1161,9 +1164,8 @@ async function launchSubagent(
   if (params.agent) {
     envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
   }
-  if (agentDefs?.autoExit) {
-    envParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-  }
+  // Always set both states: a nested child must not inherit its parent's policy.
+  envParts.push(`PI_SUBAGENT_AUTO_EXIT=${effectiveAutoExit ? "1" : "0"}`);
   envParts.push(`PI_SUBAGENT_SESSION=${shellEscape(subagentSessionFile)}`);
   envParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
   envParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
@@ -1952,9 +1954,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (parentZmx) {
           resumeEnvParts.push(`PI_SUBAGENT_PARENT_ZMX_SESSION=${shellEscape(parentZmx)}`);
         }
-        if (autoExit) {
-          resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-        }
+        resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=${autoExit ? "1" : "0"}`);
         const resumeEnvPrefix = resumeEnvParts.join(" ") + " ";
 
         const command = `${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
