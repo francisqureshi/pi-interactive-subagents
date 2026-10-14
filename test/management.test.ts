@@ -62,6 +62,14 @@ test("injected selection bindings navigate between targets and keep selection vi
   assert.deepEqual(results, [{ type: "switch", target: first }]);
 });
 
+test("manager has one blank line of padding above and below its content", () => {
+  const lines = picker().component.render(80);
+  assert.equal(lines[0], "");
+  assert.equal(lines[1], "ZMX sessions");
+  assert.match(lines.at(-2)!, /Enter: switch/);
+  assert.equal(lines.at(-1), "");
+});
+
 test("narrow render lines fit the terminal, including wide labels and footer", () => {
   const state = picker([{ label: "🔧 agent 漢字 with a very long name", surface: "wide", id: "wide" }]);
   for (const width of [0, 1, 2, 4, 12, 30, 80]) {
@@ -69,7 +77,7 @@ test("narrow render lines fit the terminal, including wide labels and footer", (
     assert.ok(lines.length >= 3);
     assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}: ${JSON.stringify(lines)}`);
   }
-  assert.match(state.component.render(80).at(-1)!, /Enter: switch · Ctrl\+K: kill · Esc: cancel/);
+  assert.match(state.component.render(80).at(-2)!, /Enter: switch · Ctrl\+K: kill · Esc: cancel/);
 });
 
 test("showManagementPicker delegates to ctx.ui.custom and returns its action", async () => {

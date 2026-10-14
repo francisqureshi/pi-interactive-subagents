@@ -8,6 +8,7 @@ import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { existsSync, writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
+import { SUBAGENT_IDENTITY_ENTRY } from "./session.ts";
 import { parentZmxSession, switchZmxSession } from "./zmx-navigation.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
@@ -84,6 +85,7 @@ export default function (pi: ExtensionAPI) {
   // Read subagent identity from env vars (set by parent orchestrator)
   const subagentName = process.env.PI_SUBAGENT_NAME ?? "";
   const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
+  const subagentRole = process.env.PI_SUBAGENT_ROLE?.trim() || subagentAgent || "default";
   const deniedToolsValue = process.env.PI_DENY_TOOLS;
   const autoExit = process.env.PI_SUBAGENT_AUTO_EXIT === "1";
   const parentSession = parentZmxSession();
@@ -114,8 +116,9 @@ export default function (pi: ExtensionAPI) {
       (_tui: any, theme: any) => {
         const box = new Box(1, 0, (text: string) => theme.bg("toolSuccessBg", text));
 
-        const label = subagentAgent || subagentName;
-        const agentTag = label ? theme.bold(theme.fg("accent", `[${label}]`)) : "";
+        const label = subagentRole;
+        const displayName = subagentName ? theme.fg("dim", ` ${subagentName}`) : "";
+        const agentTag = theme.bold(theme.fg("accent", `[${label}]`)) + displayName;
 
         if (expanded) {
           // Expanded: full tool list + denied
@@ -166,6 +169,10 @@ export default function (pi: ExtensionAPI) {
   // Show widget + status bar on session start
   pi.on("session_start", (_event, ctx) => {
     recorder.sessionStart();
+    pi.appendEntry(SUBAGENT_IDENTITY_ENTRY, {
+      ...(subagentAgent ? { agent: subagentAgent } : {}),
+      role: subagentRole,
+    });
     const tools = pi.getAllTools();
     toolNames = tools.map((t) => t.name).sort();
     denied = parseDeniedTools(deniedToolsValue);

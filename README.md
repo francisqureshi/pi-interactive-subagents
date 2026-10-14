@@ -10,8 +10,8 @@ Call `subagent()` and it **returns immediately**. The sub-agent runs in its own 
 
 ```
 ╭─ Subagents ──────────────────────────── 2 running ─╮
-│ 00:23  Scout: Auth (scout)        active · bash 7m │
-│ 00:45  Scout: DB (scout)                waiting 2m │
+│ 00:23  [scout] Auth              active · bash 7m │
+│ 00:45  [scout] DB                      waiting 2m │
 ╰────────────────────────────────────────────────────╯
 ```
 
@@ -71,6 +71,8 @@ This switch requires the parent Pi to run inside zmx. When Pi is outside a zmx s
 
 Zmx 0.4.1 can spawn detached agents but **cannot** switch between them or deliver Escape for `subagent_interrupt`; use 0.5.0+ for nested switching and a version with `zmx send` (0.8.1 recommended) for interactive input. Nothing in this backend launches or depends on Ghostty itself, so detached agents also work over SSH or in a headless shell. Switching requires exactly one attached zmx client in the current session: zmx switches the session leader, so the menu refuses to switch if multiple clients could move someone else's terminal.
 
+**Shared parent sessions:** Another computer or terminal attached to the same parent counts as another client, even if both are yours. Detach the other view with **Ctrl+\\ in that terminal**, then retry switching; Pi and its agents keep running. Do not use `zmx detach` for this: it disconnects **all** clients. If both parent views must stay open, detach only your current view with Ctrl+\\ and attach the child from your local shell (`env -u ZMX_SESSION_PREFIX zmx attach <child-session>`), then reattach the parent when finished.
+
 **Remote zmosh limitation:** The contributed `zmosh` in [zmx PR #271](https://github.com/neurosnap/zmx/pull/271) explicitly does not support switching from inside a remote attachment. Use this menu in a locally attached zmx terminal, not over `zmosh`; reconnect to remote sessions from your local shell instead. The extension rejects switches from SSH sessions without a TTY (the PR's bootstrap mode), but cannot reliably identify every remote attachment to a previously created session.
 
 ## What's Included
@@ -118,11 +120,13 @@ Multiple subagents run concurrently — each steers its result back independentl
 
 ```
 ╭─ Subagents ───────────────────────────────── 3 running ─╮
-│ 01:23  Scout: Auth (scout)            active · write 7m │
-│ 00:45  Researcher (researcher)               stalled 4m │
-│ 00:12  Scout: DB (scout)                      starting… │
+│ 01:23  [scout] Auth                  active · write 7m │
+│ 00:45  [researcher] Research                stalled 4m │
+│ 00:12  [scout] DB                            starting… │
 ╰─────────────────────────────────────────────────────────╯
 ```
+
+The widget and management list prefix each task with its configured role, such as `[worker]` or `[scout]`, so long task names do not hide the role. The label uses the selected agent definition's `name` (falling back to its lookup name); `[default]` means no agent config was selected. Role identity is saved as native session metadata and retained on resume; older sessions without it show `[unknown]` rather than guessing. The management list has one blank line above and below its content to separate it from the widget and footer.
 
 Completion messages render with a colored background and are expandable with `Ctrl+O` to show the full summary and session file path.
 

@@ -17,6 +17,8 @@ import {
   copySessionFile,
   mergeNewEntries,
   seedSubagentSessionFile,
+  readSubagentIdentity,
+  SUBAGENT_IDENTITY_ENTRY,
 } from "../pi-extension/subagents/session.ts";
 
 import {
@@ -87,6 +89,7 @@ function createMockExtensionApi() {
   const registeredMessageRenderers: Array<any> = [];
   const sentUserMessages: string[] = [];
   const sentMessages: Array<any> = [];
+  const persistedEntries: Array<any> = [];
   return {
     registeredTools,
     registeredCommands,
@@ -94,8 +97,12 @@ function createMockExtensionApi() {
     registeredMessageRenderers,
     sentUserMessages,
     sentMessages,
+    persistedEntries,
     api: {
       on() {},
+      appendEntry(customType: string, data: any) {
+        persistedEntries.push({ customType, data });
+      },
       registerTool(tool: any) {
         registeredTools.push(tool);
       },
@@ -1461,7 +1468,7 @@ describe("commands", () => {
         },
       });
       assert.match(options.join("\n"), /Back to parent \(parent-session\)/);
-      assert.match(options.join("\n"), /Scout.*pi-subagent-test-navigation/);
+      assert.match(options.join("\n"), /\[scout\] Scout.*pi-subagent-test-navigation/);
       assert.match(options.join("\n"), /Ctrl\+K: kill/);
     } finally {
       running.delete("test-navigation");
@@ -2326,7 +2333,71 @@ describe("subagent startup delay", () => {
     }
   });
 });
+describe("subagent role identity", () => {
+  it("uses the configured role name and makes bare tasks explicit", () => {
+    const testApi = (subagentsModule as any).__test__;
+    assert.equal(testApi.resolveSubagentRole({ agent: "worker" }, { name: "builder" }), "builder");
+    assert.equal(testApi.resolveSubagentRole({ agent: "scout" }, {}), "scout");
+    assert.equal(testApi.resolveSubagentRole({}, null), "default");
+    assert.equal(testApi.formatSubagentLabel({ name: "cleanup", agent: "worker", role: "builder" }), "[builder] cleanup");
+    assert.equal(testApi.formatSubagentLabel({ name: "cleanup" }), "[default] cleanup");
+  });
+
+  it("recovers the last recorded role from a session for resume", () => {
+    withTempDir((dir) => {
+      const session = createSessionFile(dir, [
+        { type: "custom", customType: SUBAGENT_IDENTITY_ENTRY, data: { agent: "scout", role: "scout" } },
+        { type: "custom", customType: SUBAGENT_IDENTITY_ENTRY, data: { agent: "worker", role: "builder" } },
+        { type: "message", message: { role: "assistant", content: [] } },
+      ]);
+      assert.deepEqual(readSubagentIdentity(session), { agent: "worker", role: "builder" });
+    });
+  });
+
+  it("does not guess a configured role for old or malformed sessions", () => {
+    withTempDir((dir) => {
+      assert.equal(readSubagentIdentity(createSessionFile(dir, [])), null);
+      const session = createSessionFile(dir, [
+        { type: "custom", customType: SUBAGENT_IDENTITY_ENTRY, data: { agent: 42, role: "worker" } },
+      ]);
+      assert.equal(readSubagentIdentity(session), null);
+      writeFileSync(session, "not JSON\n");
+      assert.equal(readSubagentIdentity(session), null);
+    });
+  });
+
+  it("records role identity as native session metadata in the child", () => {
+    const keys = ["PI_SUBAGENT_AGENT", "PI_SUBAGENT_ROLE", "PI_SUBAGENT_ACTIVITY_FILE"];
+    const previous = keys.map((key) => process.env[key]);
+    process.env.PI_SUBAGENT_AGENT = "worker";
+    process.env.PI_SUBAGENT_ROLE = "builder";
+    delete process.env.PI_SUBAGENT_ACTIVITY_FILE;
+    try {
+      const { api, persistedEntries } = createMockExtensionApi();
+      const hooks = new Map<string, Function>();
+      api.on = (event: string, handler: Function) => hooks.set(event, handler);
+      subagentDoneExtension(api);
+      hooks.get("session_start")!({}, { ui: { setWidget() {} } });
+      assert.deepEqual(persistedEntries, [{ customType: SUBAGENT_IDENTITY_ENTRY, data: { agent: "worker", role: "builder" } }]);
+    } finally {
+      keys.forEach((key, i) => restoreEnvVar(key, previous[i]));
+    }
+  });
+});
+
 describe("subagents widget rendering", () => {
+  it("keeps the role visible before a long task name", () => {
+    const testApi = (subagentsModule as any).__test__;
+    for (const role of ["worker", "default", "unknown"]) {
+      const startTime = Date.now() - 5_000;
+      const lines = testApi.renderSubagentWidgetLines([{
+        id: "role-test", role, name: "cleanup-".repeat(20), startTime,
+        statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+      }], 80);
+      assert.match(lines[1], new RegExp(`\\[${role}\\]`));
+      assert.ok(lines.every((line: string) => visibleWidth(line) <= 80));
+    }
+  });
   it("keeps every rendered line within a very narrow width", () => {
     const testApi = (subagentsModule as any).__test__;
     assert.ok(testApi, "expected subagents test helpers to be exported");

@@ -50,9 +50,11 @@ export function createManagementPicker(
       // SelectList reserves space for its prefix; clamp the width supplied to it
       // and clip all lines (including the footer) at tiny terminal widths.
       return [
+        "",
         theme.fg("accent", "ZMX sessions"),
         ...list.render(Math.max(4, size)),
         theme.fg("dim", FOOTER),
+        "",
       ].map((line) => truncateToWidth(line, size, ""));
     },
     invalidate(): void {

@@ -1,5 +1,5 @@
 /** Deterministic Pi CLI stand-in: finish a turn without calling subagent_done. */
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import subagentDone from "../../pi-extension/subagents/subagent-done.ts";
 
 const handlers = new Map<string, Function>();
@@ -11,6 +11,9 @@ const ctx = {
 subagentDone({
   on(event: string, handler: Function) { handlers.set(event, handler); },
   getAllTools() { return []; },
+  appendEntry(customType: string, data: unknown) {
+    appendFileSync(process.env.PI_SUBAGENT_SESSION!, JSON.stringify({ type: "custom", customType, data }) + "\n");
+  },
   registerTool() {},
   registerCommand() {},
   registerShortcut() {},

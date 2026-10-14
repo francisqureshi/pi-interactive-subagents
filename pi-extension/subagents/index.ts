@@ -33,6 +33,7 @@ import {
   findLastAssistantMessage,
   getNewEntries,
   seedSubagentSessionFile,
+  readSubagentIdentity,
 } from "./session.ts";
 import {
   type StatusSnapshot,
@@ -138,6 +139,7 @@ const SubagentParams = Type.Object({
 type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
 
 interface AgentDefaults {
+  name?: string;
   model?: string;
   tools?: string;
   skills?: string;
@@ -355,6 +357,18 @@ function resolveEffectiveInteractive(
   return !resolveEffectiveAutoExit(params, agentDefs);
 }
 
+function resolveSubagentRole(
+  params: Pick<Static<typeof SubagentParams>, "agent">,
+  agentDefs: AgentDefaults | null,
+): string {
+  return agentDefs?.name ?? params.agent ?? "default";
+}
+
+function formatSubagentLabel(running: Pick<RunningSubagent, "name" | "agent" | "role">): string {
+  const role = (running.role ?? running.agent ?? "default").replace(/[\r\n\t]+/g, " ").trim() || "default";
+  return `[${role}] ${running.name}`;
+}
+
 function loadAgentDefaults(agentName: string): AgentDefaults | null {
   const configDir = getAgentConfigDir();
   const paths = [
@@ -490,6 +504,7 @@ interface RunningSubagent {
   name: string;
   task: string;
   agent?: string;
+  role?: string;
   surface: string;
   startTime: number;
   sessionFile: string;
@@ -608,8 +623,7 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
 
   for (const agent of agents) {
     const elapsed = formatElapsedMMSS(agent.startTime);
-    const agentTag = agent.agent ? ` (${agent.agent})` : "";
-    const left = ` ${elapsed}  ${agent.name}${agentTag} `;
+    const left = ` ${elapsed}  ${formatSubagentLabel(agent)} `;
     const snapshot = classifyStatus(agent.statusState, Date.now());
     const right = statusConfig.enabled
       ? formatWidgetRightLabel(snapshot)
@@ -943,6 +957,8 @@ export const __test__ = {
   resolveLaunchBehavior,
   resolveEffectiveAutoExit,
   resolveEffectiveInteractive,
+  resolveSubagentRole,
+  formatSubagentLabel,
   buildSubagentToolAllowlist,
   buildPiPromptArgs,
   formatWidgetRightLabel,
@@ -983,6 +999,7 @@ async function launchSubagent(
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
+  const role = resolveSubagentRole(params, agentDefs);
   const effectiveModel = params.model ?? agentDefs?.model;
   const effectiveTools = params.tools ?? agentDefs?.tools;
   const effectiveSkills = params.skills ?? agentDefs?.skills;
@@ -1107,6 +1124,7 @@ async function launchSubagent(
       name: params.name,
       task: params.task,
       agent: params.agent,
+      role,
       surface,
       startTime,
       sessionFile: subagentSessionFile,
@@ -1176,9 +1194,10 @@ async function launchSubagent(
     envParts.push(`PI_DENY_TOOLS=${shellEscape([...denySet].join(","))}`);
   }
   envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
-  if (params.agent) {
-    envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
-  }
+  // Clear inherited identity on bare children; selecting no config is not the
+  // same as selecting the parent's role.
+  envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent ?? "")}`);
+  envParts.push(`PI_SUBAGENT_ROLE=${shellEscape(role)}`);
   // Always set both states: a nested child must not inherit its parent's policy.
   envParts.push(`PI_SUBAGENT_AUTO_EXIT=${effectiveAutoExit ? "1" : "0"}`);
   envParts.push(`PI_SUBAGENT_SESSION=${shellEscape(subagentSessionFile)}`);
@@ -1249,6 +1268,7 @@ async function launchSubagent(
     name: params.name,
     task: params.task,
     agent: params.agent,
+    role,
     surface,
     startTime,
     sessionFile: subagentSessionFile,
@@ -1455,9 +1475,8 @@ async function showSubagentSessionMenu(
     targets.push({ label: `← Back to parent (${parent})`, surface: parent });
   }
   for (const running of runningSubagents.values()) {
-    const agent = running.agent ? ` (${running.agent})` : "";
     targets.push({
-      label: `${running.name}${agent} · ${running.surface}`,
+      label: `${formatSubagentLabel(running)} · ${running.surface}`,
       surface: running.surface, id: running.id,
     });
   }
@@ -1984,6 +2003,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
+        const identity = readSubagentIdentity(params.sessionPath);
+        const role = identity?.role ?? "unknown";
+
         // Record entry count before resuming so we can extract new messages
         const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
 
@@ -2026,6 +2048,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellEscape(process.env.PI_CODING_AGENT_DIR)}`);
         }
         resumeEnvParts.push(`PI_SUBAGENT_NAME=${shellEscape(name)}`);
+        resumeEnvParts.push(`PI_SUBAGENT_AGENT=${shellEscape(identity?.agent ?? "")}`);
+        resumeEnvParts.push(`PI_SUBAGENT_ROLE=${shellEscape(role)}`);
         resumeEnvParts.push(`PI_SUBAGENT_SESSION=${shellEscape(params.sessionPath)}`);
         resumeEnvParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
         resumeEnvParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
@@ -2063,6 +2087,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           id,
           name,
           task: params.message ?? "resumed session",
+          agent: identity?.agent,
+          role,
           surface,
           startTime,
           sessionFile: params.sessionPath,
@@ -2156,6 +2182,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             id,
             name,
             sessionPath: params.sessionPath,
+            agent: identity?.agent,
+            role,
             launchScriptFile,
             surface,
             status: "started",

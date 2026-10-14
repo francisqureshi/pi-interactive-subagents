@@ -19,6 +19,31 @@ export interface MessageEntry extends SessionEntry {
 
 export type SeededSubagentSessionMode = "lineage-only" | "fork";
 
+export const SUBAGENT_IDENTITY_ENTRY = "subagent_identity";
+export interface SubagentIdentity {
+  /** Config lookup name; absent for tasks that did not select an agent config. */
+  agent?: string;
+  role: string;
+}
+
+/** Native custom entries retain role identity without adding model context. */
+export function readSubagentIdentity(sessionFile: string): SubagentIdentity | null {
+  try {
+    const entries = readEntries(sessionFile);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry.type !== "custom" || entry.customType !== SUBAGENT_IDENTITY_ENTRY) continue;
+      const data = entry.data as Partial<SubagentIdentity> | undefined;
+      if (!data || typeof data.role !== "string" || !data.role.trim()) return null;
+      if (data.agent !== undefined && typeof data.agent !== "string") return null;
+      return { ...(data.agent ? { agent: data.agent } : {}), role: data.role };
+    }
+  } catch {
+    // Legacy, missing, or damaged sessions have no trustworthy role metadata.
+  }
+  return null;
+}
+
 function getForkContentLines(parentSessionFile: string): string[] {
   const raw = readFileSync(parentSessionFile, "utf8");
   const lines = raw.split("\n").filter((line) => line.trim());

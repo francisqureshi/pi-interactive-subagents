@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { __test__ as subagents } from "../pi-extension/subagents/index.ts";
+import { readSubagentIdentity } from "../pi-extension/subagents/session.ts";
 import { switchZmxSession } from "../pi-extension/subagents/zmx-navigation.ts";
 import {
   createSurface,
@@ -130,7 +131,7 @@ async function exerciseScriptedSubagent(options: {
     writeFileSync(join(binDir, "pi"), `#!/usr/bin/env bash\nPI_TEST_STOP_REASON=${shellEscape(options.stopReason ?? "stop")} exec ${shellEscape(process.execPath)} ${shellEscape(fixture)}\n`, { mode: 0o755 });
     // Children must set both policies explicitly, not inherit the opposite
     // policy from their parent (including when the parent's flag is zero).
-    sendCommand(surface, `export PATH=${shellEscape(binDir)}:$PATH PI_SUBAGENT_AUTO_EXIT=${options.staysOpen ? "1" : "0"}; echo __FAKE_CLI_READY__`);
+    sendCommand(surface, `export PATH=${shellEscape(binDir)}:$PATH PI_SUBAGENT_AUTO_EXIT=${options.staysOpen ? "1" : "0"} PI_SUBAGENT_AGENT=parent-worker PI_SUBAGENT_ROLE=parent-worker; echo __FAKE_CLI_READY__`);
     const deadline = Date.now() + 5_000;
     while (!readScreen(surface).includes("__FAKE_CLI_READY__") && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -159,6 +160,11 @@ async function exerciseScriptedSubagent(options: {
     }
     assert.match(readScreen(surface, 25), /__DEMO_TURN_FINISHED__/, "scripted CLI should emit agent_end");
     assert.ok(readFileSync(running.sessionFile, "utf8").includes("Brief demo finished."), "the child must have actually finished its turn");
+    const expectedRole = options.params?.agent ?? "default";
+    assert.equal(running.role, expectedRole);
+    assert.deepEqual(readSubagentIdentity(running.sessionFile), {
+      ...(options.params?.agent ? { agent: options.params.agent } : {}), role: expectedRole,
+    }, "child role identity must be persisted and not inherited from its parent");
     const activity = JSON.parse(readFileSync(running.activityFile!, "utf8"));
     assert.equal(activity.latestEvent, "agent_end");
     running.abortController = abort;
